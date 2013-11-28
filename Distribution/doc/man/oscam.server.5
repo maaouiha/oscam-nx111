@@ -49,7 +49,6 @@ reader protocol, \fIrequired\fR:
 \fBdevice\fP = \fB[<readertype>;]serial:serialnum|bus:device\fP|
          \fB<device|device:slot>\fP|
          \fB<ip|hostname>,<port>[,<lport>]\fP|
-         \fB<ip|hostname>,<gboxpport>,<gboxlport>\fP|
          \fBpcsc\fP|
          \fB<0|1>\fP>|
          \fBconstantcw\fP
@@ -81,10 +80,6 @@ define local or remote reader
  \fBport\fP:        TCP/IP port
 
  \fBlport\fP:       remapping to local TCP/IP port
-
- \fBgboxpport\fP:   TCP/IP port for remote gbox peer
-
- \fBgboxlport\fP:   TCP/IP port for local gbox peer
 
  \fBPCSC\fP:        number of PCSC reader, starting with 0
 
@@ -147,12 +142,12 @@ set card init mode for AzBox internal reader, default:none
 .PP
 \fBcool_timeout_init\fP = \fBtimeout\fP
 .RS 3n
-set timeout for SC init in milli-seconds for Coolstream internal reader only, default:0
+set timeout for SC init in milli-seconds for Coolstream internal reader only, default:50
 .RE
 .PP
 \fBcool_timeout_after_init\fP = \fBtimeout\fP
 .RS 3n
-set read/transmit timeout after SC init in milli-seconds for Coolstream internal reader only, default:0
+set read/transmit timeout after SC init in milli-seconds for Coolstream internal reader only, default:150
 .RE
 .PP
 \fBins7e\fP = \fBpayload\fP
@@ -235,12 +230,12 @@ key for newcamd remote reader encryption
 .PP
 \fBuser\fP = \fBname\fP
 .RS 3n
-user for remote reader
+user for remote reader, overrides user of \fBaccount\fP, first come first serve
 .RE
 .PP
 \fBpassword\fP = \fBpassword\fP
 .RS 3n
-password for remote reader
+password for remote reader, overrides password of \fBaccount\fP, first come first serve
 .RE
 .PP
 \fBmg-encrypted\fP = D: { \fB<IP|hostname>\fP { \fB<local port>\fP \fB<remote port>\fP { \fB<password>\fP { \fB<level>\fP \fB<level>\fP }}}}[,\fB<local MAC address>\fP]
@@ -309,17 +304,12 @@ example: auprovid = 123456
 .PP
 \fBinactivitytimeout\fP = \fBseconds\fP
 .RS 3n
-inactivity timeout for all TCP based remote readers, -1 = reconnect on network failure for newcamd based readers, even in idle, default:0
+inactivity timeout for all TCP based remote readers, default:0
 .RE
 .PP
 \fBreconnecttimeout\fP = \fBseconds\fP
 .RS 3n
 reconnect if missing answers from a remote reader, default:30
-.RE
-.PP
-\fBconnectoninit\fP = \fB0\fP|\fB1\fP
-.RS 3n
-1 = allow newcamd connections to be established on startup although there isn't a request yet, default:0
 .RE
 .PP
 \fBfallback\fP = \fB0\fP|\fB1\fP
@@ -346,13 +336,6 @@ set EMM cache of local reader:
             \fB16\fP = logging disabled AU
 
  example: emmcache = 1,3,2
-.RE
-.PP
-\fBemmreassembly\fP = \fB0\fP|\fB1\fP
-.RS 3n
-1 = enable EMM reassembly, should be set for Viaccess and Cryptoworks readers 
-if the client that you are using to send EMMs is reassembling them instead of 
-just sending them to OSCam for processing, default:1
 .RE
 .PP
 \fBcacheex\fP = \fB0\fP|\fB1\fP|\fB2\fP|\fB3\fP
@@ -391,6 +374,11 @@ drop incoming Cardservproxy cache (mode 2 only), detection is zero ecmd5, defaul
 allow incoming ECM request (mode 2), default:1
 .RE
 .PP
+\fBlogport\fP = \fB0\fP|\fBport\fP
+.RS 3n
+camd 3.x reader logport, camd 3.x UDP must be activated, only works if there's no camd 3.x cascading, 0 = disabled, default=0
+.RE
+.PP
 \fBecmwhitelist\fP = [\fBCAID\fP[@\fBprovid\fP]:]\fBlength\fP[,\fBlength\fP]...[;[\fBCAID\fP[@\fBprovid\fP]:]\fBlength\fP[,\fBlength\fP]...]...
 .RS 3n
 set valid ECM length per CAID and provid in hex, default:none,provid=000000
@@ -411,11 +399,6 @@ set vaild ECM header per CAID and provid in hex, default:none,provid=000000
 number of different SIDs in ECMs allowed for an interval, default:0
 .RE
 .PP
-\fBecmnotfoundlimit\fP = \fBcount\fP
-.RS 3n
-number of ECMs with "not found" answer until the reader will be restarted, 0 = no limit, default:0
-.RE
-.PP
 \fBresetcycle\fP = \fBcount\fP
 .RS 3n
 number of ECMs until reader reset is performed, 0 = disabled, default:0
@@ -429,16 +412,6 @@ restart instead of reset for resetcycle, default:0
 \fBratelimitseconds\fP = \fBseconds\fP
 .RS 3n
 interval for rate limit, default:0
-.RE
-.PP
-\fBecmunique\fP = \fB0\fP|\fB1\fP
-.RS 3n
-1 = enable check for matching ECM hash in ratelimit slot , default:0
-.RE
-.PP
-\fBsrvidholdseconds \fP = \fBseconds\fP
-.RS 3n
-time to keep service ID in ratelimit slot, during this time checkeding for ecmunique is disbaled, default:0
 .RE
 .PP
 \fBcooldown\fP = \fBdelay\fP,\fBduration\fP
@@ -599,31 +572,6 @@ reconnect again after ECM request timeout in milli-seconds, default:4000
 \fBcccmindown\fP = \fBnumber\fP
 .RS 3n
 filters all readers with hops smaller than number, default:0
-.RE
-.PP
-\fBgbox_my_password\fP = \fBpassword\fP
-.RS 3n
-password for connection to local gbox peer, default:none
-.RE
-.PP
-\fBgbox_reshare\fP = \fBlevel\fP
-.RS 3n
-gbox reshare level of local cards, default:0
-.RE
-.PP
-\fBgbox_max_distance\fP = \fBdistance\fP
-.RS 3n
-maximum distance to receive gbox peer cards, default:2
-.RE
-.PP
-\fBgbox_max_ecm_send\fP = \fBnumber\fP
-.RS 3n
-maximum of gbox peers ECMs will be send to, default:3
-.RE
-.PP
-\fBgbox_group\fP = \fB\fP
-.RS 3n
-reader assingment to gbox group, default:none
 .RE
 .SH OVERCLOCKING
 .TP 3n
@@ -813,12 +761,12 @@ constant CW
 gbox reader
 
  [reader]
- label    = mygboxreader
- protocol = gbox
- device   = 192.168.0.4,45678,56789
- user     = user4
- password = password4
- group    = 11
- caid     = 1100
+ label        = mygboxreader
+ protocol     = gbox
+ device       = 192.168.0.4,45678,56789
+ user         = user4
+ password     = password4
+ group        = 11
+ caid         = 1100
 .SH "SEE ALSO"
 \fBlist_smargo\fR(1), \fBoscam\fR(1), \fBoscam.ac\fR(5), \fBoscam.cacheex\fR(5), \fBoscam.cert\fR(5), \fBoscam.conf\fR(5), \fBoscam.dvbapi\fR(5), \fBoscam.guess\fR(5), \fBoscam.ird\fR(5), \fBoscam.provid\fR(5), \fBoscam.services\fR(5), \fBoscam.srvid\fR(5), \fBoscam.tiers\fR(5), \fBoscam.user\fR(5), \fBoscam.whitelist\fR(5)

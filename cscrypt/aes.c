@@ -1,4 +1,4 @@
-#include "aes.h"
+#include "cscrypt.h"
 
 #ifndef WITH_LIBCRYPTO
 //FIXME Not checked on threadsafety yet; after checking please remove this line

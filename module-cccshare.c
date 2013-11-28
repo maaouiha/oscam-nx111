@@ -10,19 +10,17 @@
 #include "oscam-lock.h"
 #include "oscam-string.h"
 #include "oscam-time.h"
-#include "oscam-work.h"
 
-extern uint32_t cfg_sidtab_generation;
+extern struct s_module modules[CS_MAX_MOD];
 
 static uint32_t cc_share_id = 0x64;
 static LLIST *reported_carddatas_list[CAID_KEY];
 static CS_MUTEX_LOCK cc_shares_lock;
 
-static int32_t card_added_count;
-static int32_t card_removed_count;
-static int32_t card_dup_count;
-static pthread_t share_updater_thread;
-static bool share_updater_thread_active;
+static int32_t card_added_count = 0;
+static int32_t card_removed_count = 0;
+static int32_t card_dup_count = 0;
+static pthread_t share_updater_thread = 0;
 
 int32_t card_valid_for_client(struct s_client *cl, struct cc_card *card);
 
@@ -94,15 +92,15 @@ void add_good_bad_sids(struct s_sidtab *ptr, SIDTABBITS sidtabno, struct cc_card
 
 void add_good_bad_sids_by_rdr(struct s_reader *rdr, struct cc_card *card) {
 
-	if (!rdr->sidtabs.ok) return;
+	if (!rdr->sidtabok) return;
 
 	struct s_sidtab *ptr;
 	int32_t n,i;
 	for (n=0,ptr=cfg.sidtab; ptr; ptr=ptr->next,n++) {
-		if (rdr->sidtabs.ok&((SIDTABBITS)1<<n)) {
+		if (rdr->sidtabok&((SIDTABBITS)1<<n)) {
 			for (i=0; i<ptr->num_caid;i++) {
 				if (ptr->caid[i] == card->caid)
-					add_good_bad_sids(ptr, rdr->sidtabs.no, card);
+					add_good_bad_sids(ptr, rdr->sidtabno, card);
 			}
 		}
 	}
@@ -172,7 +170,7 @@ int32_t write_card(struct cc_data *cc, uint8_t *buf, struct cc_card *card, int32
 		        //bad sids:
 		        int32_t n;
 		        for (n=0,ptr=cfg.sidtab; ptr; ptr=ptr->next,n++) {
-						if (cl->sidtabs.no&((SIDTABBITS)1<<n) || card->sidtabno&((SIDTABBITS)1<<n)) {
+						if (cl->sidtabno&((SIDTABBITS)1<<n) || card->sidtabno&((SIDTABBITS)1<<n)) {
                 				int32_t m;
                 				int32_t ok_caid = 0;
                 				for (m=0;m<ptr->num_caid;m++) { //search bad sids for this caid:
@@ -240,70 +238,58 @@ int32_t write_card(struct cc_data *cc, uint8_t *buf, struct cc_card *card, int32
     return ofs;
 }
 
-static int32_t send_card_to_client(struct cc_card *card, struct s_client *cl) {
-	uint8_t buf[CC_MAXMSGSIZE];
 
-	if (!card_valid_for_client(cl, card))
-		return 0;
+int32_t send_card_to_clients(struct cc_card *card, struct s_client *one_client) {
+        int32_t count = 0;
 
-	int8_t usr_reshare = cl->account->cccreshare;
-	if (usr_reshare == -1)
-		usr_reshare = cfg.cc_reshare;
+        uint8_t buf[CC_MAXMSGSIZE];
 
-	int8_t ignorereshare = cl->account->cccignorereshare;
-	if (ignorereshare == -1)
-		ignorereshare = cfg.cc_ignore_reshare;
+        struct s_client *cl;
+    	cs_readlock(&clientlist_lock);
+        for (cl = one_client?one_client:first_client; cl; cl=one_client?NULL:cl->next) {
+                struct cc_data *cc = cl->cc;
+                if (!cl->kill && cl->typ=='c' && cc && (one_client || modules[cl->ctyp].num == R_CCCAM)) { //CCCam-Client!
+                		int32_t is_ext = cc->cccam220 && can_use_ext(card);
+                		int32_t msg = is_ext?MSG_NEW_CARD_SIDINFO:MSG_NEW_CARD;
+                        if (card_valid_for_client(cl, card)) {
+								int8_t usr_reshare = cl->account->cccreshare;
+								if (usr_reshare == -1) usr_reshare = cfg.cc_reshare;
+                                int8_t ignorereshare = cl->account->cccignorereshare;
+                                if (ignorereshare == -1) ignorereshare = cfg.cc_ignore_reshare;
 
-	int8_t reader_reshare = card->origin_reader ? card->rdr_reshare : usr_reshare;
-	if (reader_reshare == -1)
-		reader_reshare = cfg.cc_reshare;
+                                int8_t reader_reshare = card->origin_reader ? card->rdr_reshare : usr_reshare;
+                                if (reader_reshare == -1) reader_reshare = cfg.cc_reshare;
+                                int8_t reshare = (reader_reshare < usr_reshare) ? reader_reshare : usr_reshare;
+								int8_t new_reshare;
+								if (card->card_type == CT_CARD_BY_SERVICE_USER)
+									new_reshare = usr_reshare;
+								else if (ignorereshare)
+									new_reshare = reshare;
+								else {
+									new_reshare = card->reshare;
+									if (card->card_type == CT_REMOTECARD)
+										new_reshare--;
+									if (new_reshare > reshare)
+										new_reshare = reshare;
+								}
+                                if (new_reshare < 0)
+                                		continue;
 
-	int8_t reshare = (reader_reshare < usr_reshare) ? reader_reshare : usr_reshare;
-	int8_t new_reshare;
-	if (card->card_type == CT_CARD_BY_SERVICE_USER) {
-		new_reshare = usr_reshare;
-	} else if (ignorereshare) {
-		new_reshare = reshare;
-	} else {
-		new_reshare = card->reshare;
-		if (card->card_type == CT_REMOTECARD)
-			new_reshare--;
-		if (new_reshare > reshare)
-			new_reshare = reshare;
-	}
-	if (new_reshare < 0)
-		return 0;
+								if (!card->id)
+										card->id = cc_share_id++;
 
-	if (!card->id)
-		card->id = cc_share_id++;
+								int32_t len = write_card(cc, buf, card, 1, is_ext, ll_count(cl->aureader_list), cl);
+								//buf[10] = card->hop-1;
+								buf[11] = new_reshare;
 
-	struct cc_data *cc = cl->cc;
-	int32_t is_ext = cc->cccam220 && can_use_ext(card);
-	int32_t len = write_card(cc, buf, card, 1, is_ext, ll_count(cl->aureader_list), cl);
-	//buf[10] = card->hop-1;
-	buf[11] = new_reshare;
-
-	struct s_clientmsg *clientmsg;
-	if (cs_malloc(&clientmsg, sizeof(struct s_clientmsg))){
-		memcpy(clientmsg->msg, buf, len);
-		clientmsg->len = len;
-		clientmsg->cmd = is_ext?MSG_NEW_CARD_SIDINFO:MSG_NEW_CARD;
-		add_job(cl, ACTION_CLIENT_SEND_MSG, clientmsg, sizeof(struct s_clientmsg));
-	}
-	return 1;
-}
-
-int32_t send_card_to_all_clients(struct cc_card *card) {
-	int32_t count = 0;
-	struct s_client *cl;
-	cs_readlock(&clientlist_lock);
-	for (cl = first_client; cl; cl = cl->next) {
-		if (cl->cc && cl->typ=='c' && !cl->kill && get_module(cl)->num == R_CCCAM) { //CCCam-Client!
-			count += send_card_to_client(card, cl);
+								if (cc_cmd_send(cl, buf, len, msg) < 0)
+										cl->kill = 1;
+								count++;
+                        }
+                }
 		}
-	}
-	cs_readunlock(&clientlist_lock);
-	return count;
+        cs_readunlock(&clientlist_lock);
+        return count;
 }
 
 void send_remove_card_to_clients(struct cc_card *card) {
@@ -317,18 +303,12 @@ void send_remove_card_to_clients(struct cc_card *card) {
 		buf[3] = card->id & 0xFF;
 
 		struct s_client *cl;
-		struct s_clientmsg *clientmsg;
 		cs_readlock(&clientlist_lock);
 		for (cl = first_client; cl; cl=cl->next) {
 				struct cc_data *cc = cl->cc;
-				if (cc && cl->typ=='c' && !cl->kill && get_module(cl)->num == R_CCCAM) { //CCCam-Client!
+				if (cl->typ=='c' && cc && modules[cl->ctyp].num == R_CCCAM && !cl->kill) { //CCCam-Client!
 						if (card_valid_for_client(cl, card)) {
-							if(cs_malloc(&clientmsg, sizeof(struct s_clientmsg))){
-								memcpy(clientmsg->msg, buf, sizeof(buf));
-								clientmsg->len = sizeof(buf);
-								clientmsg->cmd = MSG_CARD_REMOVED;
-								add_job(cl, ACTION_CLIENT_SEND_MSG, clientmsg, sizeof(struct s_clientmsg));
-							}
+								cc_cmd_send(cl, buf, 4, MSG_CARD_REMOVED);
 						}
 				}
 		}
@@ -482,16 +462,16 @@ int32_t card_valid_for_client(struct s_client *cl, struct cc_card *card) {
         if (card->sidtab) {
         		struct s_sidtab *ptr;
         		int32_t j;
-        		int32_t ok = !cl->sidtabs.ok && !cl->sidtabs.no; //default valid if no positive services and no negative services
+        		int32_t ok = !cl->sidtabok && !cl->sidtabno; //default valid if no positive services and no negative services
         		if (!ok) {
-        				if (!cl->sidtabs.ok) // no positive services, so ok by default if no negative found
+        				if (!cl->sidtabok) // no positive services, so ok by default if no negative found
         						ok=1;
 
 		        		for (j=0,ptr=cfg.sidtab; ptr; ptr=ptr->next,j++) {
         						if (ptr == card->sidtab) {
-										if (cl->sidtabs.no&((SIDTABBITS)1<<j))
+										if (cl->sidtabno&((SIDTABBITS)1<<j))
         										return 0;
-										if (cl->sidtabs.ok&((SIDTABBITS)1<<j))
+										if (cl->sidtabok&((SIDTABBITS)1<<j))
         										ok = 1;
 										break;
 								}
@@ -637,7 +617,7 @@ struct cc_card *create_card2(struct s_reader *rdr, int32_t j, uint16_t caid, uin
     if (rdr) {
     	card->grp = rdr->grp;
 		card->rdr_reshare = rdr->cc_reshare > -1 ? rdr->cc_reshare : cfg.cc_reshare; //copy reshare because reader could go offline
-    	card->sidtabno = rdr->sidtabs.no;
+    	card->sidtabno = rdr->sidtabno;
     	card->hop = rdr->cc_hop;
 	}
 	else card->rdr_reshare = reshare;
@@ -954,6 +934,7 @@ void update_card_list(void) {
                         struct cc_provider *prov;
                         if (!cs_malloc(&prov, sizeof(struct cc_provider)))
                             return;
+                        memset(prov, 0, sizeof(struct cc_provider));
                         prov->prov = ptr->provid[l];
                         ll_append(card->providers, prov);
                     }
@@ -989,10 +970,10 @@ void update_card_list(void) {
 
             //Reader-Services:
             if ((cfg.cc_reshare_services==1||cfg.cc_reshare_services==2||(!rdr->caid && rdr->typ != R_CCCAM && cfg.cc_reshare_services!=4 )) &&
-            		cfg.sidtab && (rdr->sidtabs.no || rdr->sidtabs.ok)) {
+            		cfg.sidtab && (rdr->sidtabno || rdr->sidtabok)) {
                 struct s_sidtab *ptr;
                 for (j=0,ptr=cfg.sidtab; ptr; ptr=ptr->next,j++) {
-                    if (!(rdr->sidtabs.no&((SIDTABBITS)1<<j)) && (rdr->sidtabs.ok&((SIDTABBITS)1<<j))) {
+                    if (!(rdr->sidtabno&((SIDTABBITS)1<<j)) && (rdr->sidtabok&((SIDTABBITS)1<<j))) {
                         for (k=0;k<ptr->num_caid;k++) {
                             card = create_card2(rdr, (j<<8)|k, ptr->caid[k], reshare);
                             if (!card)
@@ -1226,7 +1207,7 @@ void update_card_list(void) {
     //now send new cards. Always remove first, then add new:
     it = ll_iter_create(new_cards);
     while ((card = ll_iter_next(&it))) {
-		send_card_to_all_clients(card);
+		send_card_to_clients(card, NULL);
 	}
 	ll_destroy_NULL(new_cards);
 
@@ -1247,7 +1228,7 @@ int32_t cc_srv_report_cards(struct s_client *cl) {
 		if (reported_carddatas_list[i]) {
 			it = ll_iter_create(reported_carddatas_list[i]);
 			while (cl->cc && !cl->kill && (card = ll_iter_next(&it))) {
-				count += send_card_to_client(card, cl);
+				count += send_card_to_clients(card, cl);
 			}
 		}
 	}
@@ -1273,7 +1254,7 @@ void share_updater(void)
 		uint32_t last_card_check = 0;
 		uint32_t last_sidtab_generation = 0;
 		uint32_t card_count = 0;
-		while (share_updater_thread_active) {
+		while (1) {
 				if (i > 0 && card_count < 100) { //fast refresh only if we have less cards
 						cs_debug_mask(D_TRACE, "share-updater mode=initfast t=1s i=%d", i);
 						cs_sleepms(1000);
@@ -1291,8 +1272,6 @@ void share_updater(void)
 						cs_debug_mask(D_TRACE, "share-updater mode=interval t=%ds", cfg.cc_update_interval);
 						cs_sleepms(cfg.cc_update_interval*1000);
 				}
-				if (!share_updater_thread_active)
-					break;
 
 				uint32_t cur_check = 0;
 				uint32_t cur_card_check = 0;
@@ -1331,8 +1310,8 @@ void share_updater(void)
 						cur_check_rdroptions = crc32(cur_check_rdroptions, (uint8_t*)&rdr->ftab, sizeof(FTAB)); //check reader
 						cur_check_rdroptions = crc32(cur_check_rdroptions, (uint8_t*)&rdr->ctab, sizeof(CAIDTAB)); //check caidtab
 						cur_check_rdroptions = crc32(cur_check_rdroptions, (uint8_t*)&rdr->fchid, sizeof(FTAB)); //check chids
-						cur_check_rdroptions = crc32(cur_check_rdroptions, (uint8_t*)&rdr->sidtabs.ok, sizeof(rdr->sidtabs.ok)); //check assigned ok services
-						cur_check_rdroptions = crc32(cur_check_rdroptions, (uint8_t*)&rdr->sidtabs.no, sizeof(rdr->sidtabs.no)); //check assigned no services
+						cur_check_rdroptions = crc32(cur_check_rdroptions, (uint8_t*)&rdr->sidtabok, sizeof(rdr->sidtabok)); //check assigned ok services
+						cur_check_rdroptions = crc32(cur_check_rdroptions, (uint8_t*)&rdr->sidtabno, sizeof(rdr->sidtabno)); //check assigned no services
 					}
 				}
 				
@@ -1355,8 +1334,6 @@ void share_updater(void)
 				}
 				last_check_rdroptions = cur_check_rdroptions;
 		}
-		for (i = 0; i < CAID_KEY; i++)
-			cc_free_reported_carddata(reported_carddatas_list[i], NULL, 0);
 }
 
 int32_t compare_cards_by_hop(struct cc_card **pcard1, struct cc_card **pcard2)
@@ -1392,7 +1369,6 @@ void cccam_init_share(void) {
 		cs_lock_create(&cc_shares_lock, 200, "cc_shares_lock");
 
 		share_updater_thread = 0;
-		share_updater_thread_active = 1;
 		pthread_t temp;
         pthread_attr_t attr;
         pthread_attr_init(&attr);
@@ -1410,8 +1386,12 @@ void cccam_init_share(void) {
 
 void cccam_done_share(void) {
 		if (share_updater_thread) {
-				share_updater_thread_active = 0;
+				pthread_cancel(share_updater_thread);
 				share_updater_thread = 0;
+
+				int8_t i;
+				for (i=0;i<CAID_KEY;i++)
+					cc_free_reported_carddata(reported_carddatas_list[i], NULL, 0);
 		}
 }
 #endif

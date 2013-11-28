@@ -2,6 +2,8 @@
 #include "oscam-net.h"
 #include "oscam-string.h"
 
+extern struct s_module modules[CS_MAX_MOD];
+
 static int32_t cs_check_v(IN_ADDR_T ip, int32_t port, int32_t add, char *info) {
 	int32_t result = 0;
 
@@ -73,11 +75,10 @@ int32_t cs_check_violation(IN_ADDR_T ip, int32_t port) {
 	return cs_check_v(ip, port, 0, NULL);
 }
 
-int32_t cs_add_violation_by_ip(IN_ADDR_T ip, int32_t port, char *info) {
-	return cs_check_v(ip, port, 1, info);
+void cs_add_violation_by_ip(IN_ADDR_T ip, int32_t port, char *info) {
+	cs_check_v(ip, port, 1, info);
 }
 
 void cs_add_violation(struct s_client *cl, char *info) {
-	struct s_module *module = get_module(cl);
-	cs_add_violation_by_ip(cl->ip, module->ptab.ports[cl->port_idx].s_port, info);
+	cs_add_violation_by_ip(cl->ip, modules[cl->ctyp].ptab ? modules[cl->ctyp].ptab->ports[cl->port_idx].s_port : 0, info);
 }

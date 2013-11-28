@@ -10,9 +10,6 @@
 #include "module-stat.h"
 #include "oscam-chk.h"
 #include "oscam-client.h"
-#include "oscam-config.h"
-#include "oscam-ecm.h"
-#include "oscam-emm.h"
 #include "oscam-files.h"
 #include "oscam-net.h"
 #include "oscam-reader.h"
@@ -23,14 +20,9 @@
 extern int32_t openxcas_provid;
 extern uint16_t openxcas_sid, openxcas_caid, openxcas_ecm_pid;
 
-int32_t disable_pmt_files=0;
-DEMUXTYPE demux[MAX_DEMUX];
-struct s_dvbapi_priority *dvbapi_priority;
-struct s_client *dvbapi_client;
-
 const char *boxdesc[] = { "none", "dreambox", "duckbox", "ufs910", "dbox2", "ipbox", "ipbox-pmt", "dm7000", "qboxhd", "coolstream", "neumo", "pc" };
 
-static const struct box_devices devices[BOX_COUNT] = {
+const struct box_devices devices[BOX_COUNT] = {
 	/* QboxHD (dvb-api-3)*/	{ "/tmp/virtual_adapter/", 	"ca%d",		"demux%d",			"/tmp/camd.socket", DVBAPI_3  },
 	/* dreambox (dvb-api-3)*/	{ "/dev/dvb/adapter%d/",	"ca%d", 		"demux%d",			"/tmp/camd.socket", DVBAPI_3 },
 	/* dreambox (dvb-api-1)*/	{ "/dev/dvb/card%d/",	"ca%d",		"demux%d",			"/tmp/camd.socket", DVBAPI_1 },
@@ -39,14 +31,18 @@ static const struct box_devices devices[BOX_COUNT] = {
 	/* coolstream*/		{ "/dev/cnxt/", 		"null",		"null",			"/tmp/camd.socket", COOLAPI }
 };
 
-static int32_t selected_box=-1;
-static int32_t selected_api=-1;
-static int32_t dir_fd=-1;
-static int32_t pausecam;
-static int32_t ca_fd[8];
-static LLIST *channel_cache;
+int32_t selected_box=-1;
+int32_t selected_api=-1;
+int32_t disable_pmt_files=0;
+int32_t dir_fd=-1, pausecam=0;
+DEMUXTYPE demux[MAX_DEMUX];
+int32_t ca_fd[8];
+LLIST *channel_cache;
 
-struct s_emm_filter {
+struct s_dvbapi_priority *dvbapi_priority=NULL;
+struct s_client *dvbapi_client=NULL;
+
+struct s_emm_filter {	
 	int32_t 	demux_id;
 	uchar 		filter[32];
 	uint16_t 	caid;
@@ -55,13 +51,12 @@ struct s_emm_filter {
 	int32_t 	count;
 	uint32_t 	num;
 	time_t 		time_started;
-};
+} S_EMM_FILTER;
+LLIST	*ll_emm_active_filter 	= NULL;
+LLIST	*ll_emm_inactive_filter = NULL;
+LLIST	*ll_emm_pending_filter 	= NULL;
 
 int32_t priority_is_changed=0;
-
-static LLIST *ll_emm_active_filter;
-static LLIST *ll_emm_inactive_filter;
-static LLIST *ll_emm_pending_filter;
 
 struct s_channel_cache {
 	uint16_t	caid;
@@ -69,7 +64,7 @@ struct s_channel_cache {
 	uint16_t	srvid;
 	uint16_t	pid;
 	int8_t		chid;
-};
+} CHANNEL_CACHE;
 
 struct s_channel_cache *find_channel_cache(int32_t demux_id, int32_t pidindex, int8_t caid_and_prid_only)
 {
@@ -537,6 +532,30 @@ void dvbapi_start_filter(int32_t demux_id, int32_t pidindex, uint16_t pid, uint1
 	dvbapi_set_filter(demux_id, selected_api, pid, caid, 0, filter, filter+16, timeout, pidindex, count, type, 0);
 }
 
+void dvbapi_sort_nanos(unsigned char *dest, const unsigned char *src, int32_t len)
+{
+	int32_t w=0, c=-1, j=0;
+	while(1) {
+		int32_t n=0x100;
+		for(j=0; j<len;) {
+			int32_t l=src[j+1]+2;
+				if(src[j]==c) {
+					if(w+l>len) {
+						cs_debug_mask(D_DVBAPI, "sortnanos: sanity check failed. Exceeding memory area. Probably corrupted nanos!");
+						memset(dest,0,len); // zero out everything
+						return;
+					}
+					memcpy(&dest[w],&src[j],l);
+				w+=l;
+			} else if(src[j]>c && src[j]<n)
+				n=src[j];
+			j+=l;
+		}
+		if(n==0x100) break;
+		c=n;
+	}
+}
+
 static int32_t dvbapi_find_emmpid(int32_t demux_id, uint8_t type, uint16_t caid, uint32_t provid) {
 	int32_t k;
 	int32_t bck = -1;
@@ -822,7 +841,7 @@ void dvbapi_parse_cat(int32_t demux_id, uchar *buf, int32_t len) {
 	return;
 }
 
-static pthread_mutex_t lockindex;
+static pthread_mutex_t lockindex = PTHREAD_MUTEX_INITIALIZER;
 int32_t dvbapi_get_descindex(void) {
 	pthread_mutex_lock(&lockindex); // to avoid race when readers become responsive!
 	int32_t i,j,idx=1,fail=1;
@@ -1045,6 +1064,13 @@ struct s_dvbapi_priority *dvbapi_check_prio_match(int32_t demux_id, int32_t pidi
 
 }
 
+#ifdef READER_VIACCESS
+extern int32_t viaccess_reassemble_emm(uchar *buffer, uint32_t *len, int32_t demux_index, uint16_t caid, uint32_t provid, uint16_t pid);
+#endif
+#ifdef READER_CRYPTOWORKS
+extern int32_t cryptoworks_reassemble_emm(uchar *buffer, uint32_t *len);
+#endif
+
 void dvbapi_process_emm (int32_t demux_index, int32_t filter_num, unsigned char *buffer, uint32_t len) {
 	EMM_PACKET epg;
 
@@ -1055,6 +1081,22 @@ void dvbapi_process_emm (int32_t demux_index, int32_t filter_num, unsigned char 
 
 	uint32_t provider = filter->provid;
 	uint16_t caid = filter->caid;
+
+	switch (caid >> 8) {
+		case 0x05:
+#ifdef READER_VIACCESS
+			if (!viaccess_reassemble_emm(buffer, &len, demux_index, filter->caid, filter->provid, filter->pid))
+#endif
+				return;
+			break;
+      		case 0x0d:
+#ifdef READER_CRYPTOWORKS
+			if (!cryptoworks_reassemble_emm(buffer, &len)) 
+#endif
+				return;
+			break;
+	}
+
 
 	cs_debug_mask(D_DVBAPI, "emm from fd %d", demux[demux_index].demux_fd[filter_num].fd); //emm shown with -d64
 
@@ -1084,7 +1126,8 @@ void dvbapi_read_priority(void) {
 
 	const char *cs_prio="oscam.dvbapi";
 
-	fp = fopen(get_config_filename(token, sizeof(token), cs_prio), "r");
+	snprintf(token, sizeof(token), "%s%s", cs_confdir, cs_prio);
+	fp=fopen(token, "r");
 
 	if (!fp) {
 		cs_debug_mask(D_DVBAPI, "ERROR: Can't open priority file %s", token);
@@ -1299,7 +1342,8 @@ int32_t dvbapi_write_prio() {
 
 	if(!priority_is_changed || !dvbapi_priority )return 0;
 
-	fp = fopen(get_config_filename(token, sizeof(token), cs_prio), "w");
+	snprintf(token, 127, "%s%s", cs_confdir, cs_prio);
+	fp=fopen(token, "w");
 	
 	if (!fp) {
 		cs_log("can't open priority file %s to write", token);
@@ -1447,7 +1491,6 @@ void dvbapi_resort_ecmpids(int32_t demux_index) {
 				else
 					demux[demux_index].ECMpids[n].status = 1;
 			}
-			demux[demux_index].max_emm_filter = MAX_FILTER-1;
 			demux[demux_index].max_status = 1;
 			return;
 		}
@@ -1656,11 +1699,11 @@ void dvbapi_resort_ecmpids(int32_t demux_index) {
 
 		for (nr=0, sidtab=cfg.sidtab; sidtab; sidtab=sidtab->next, nr++) {
 			if (sidtab->num_caid | sidtab->num_provid | sidtab->num_srvid) {
-				if ((cfg.dvbapi_sidtabs.no&((SIDTABBITS)1<<nr)) && (chk_srvid_match(&er, sidtab))) {
+				if ((cfg.dvbapi_sidtabno&((SIDTABBITS)1<<nr)) && (chk_srvid_match(&er, sidtab))) {
 					demux[demux_index].ECMpids[n].status = -1; //ignore
 					cs_debug_mask(D_DVBAPI,"[IGNORE PID %d] %04X:%06X:%04X (service %s) pos %d", n, demux[demux_index].ECMpids[n].CAID, demux[demux_index].ECMpids[n].PROVID, demux[demux_index].ECMpids[n].ECM_PID, sidtab->label, nr);
 				}
-				if ((cfg.dvbapi_sidtabs.ok&((SIDTABBITS)1<<nr)) && (chk_srvid_match(&er, sidtab))) {
+				if ((cfg.dvbapi_sidtabok&((SIDTABBITS)1<<nr)) && (chk_srvid_match(&er, sidtab))) {
 					demux[demux_index].ECMpids[n].status = highest_prio++; //priority
 					cs_debug_mask(D_DVBAPI,"[PRIORITIZE PID %d] %04X:%06X:%04X (service: %s position: %d)", n, demux[demux_index].ECMpids[n].CAID, demux[demux_index].ECMpids[n].PROVID, demux[demux_index].ECMpids[n].ECM_PID, sidtab->label, demux[demux_index].ECMpids[n].status);
 				}
@@ -2187,7 +2230,7 @@ int32_t dvbapi_init_listenfd(void) {
 		return 0;
 	if ((listenfd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0)
 		return 0;
-	if (bind(listenfd, (struct sockaddr *)&servaddr, clilen) < 0)
+	if (bind(listenfd, (struct sockaddr_un *) &servaddr, clilen) < 0)
 		return 0;
 	if (listen(listenfd, 5) < 0)
 		return 0;
@@ -2200,7 +2243,51 @@ int32_t dvbapi_init_listenfd(void) {
        return listenfd;
 }
 
-static pthread_mutex_t event_handler_lock;
+void dvbapi_chk_caidtab(char *caidasc, char type) {
+	char *ptr1, *ptr3, *saveptr1 = NULL;
+
+	for (ptr1=strtok_r(caidasc, ",", &saveptr1); (ptr1); ptr1=strtok_r(NULL, ",", &saveptr1)) {
+		uint32_t caid, prov;
+		if( (ptr3=strchr(trim(ptr1), ':')) )
+			*ptr3++='\0';
+		else
+			ptr3="";
+		
+		if (((caid=a2i(ptr1, 2))|(prov=a2i(ptr3, 3)))) {
+			struct s_dvbapi_priority *entry;
+			if (!cs_malloc(&entry, sizeof(struct s_dvbapi_priority)))
+				return;
+			entry->caid=caid;
+
+			if(*ptr3 == '\0')
+				prov=0xFFFFFF;
+
+			if (type=='d') {
+				char tmp1[5];
+				snprintf(tmp1, sizeof(tmp1), "%04X", (uint)prov);
+				int32_t cw_delay = strtol(tmp1, '\0', 10);
+				entry->delay=cw_delay;
+			} else
+				entry->provid=prov;
+
+			entry->type=type;
+
+			entry->last=NULL;
+			entry->next=NULL;
+
+			if (!dvbapi_priority) {
+				dvbapi_priority=entry;
+			} else {
+	 			struct s_dvbapi_priority *p;
+				for (p = dvbapi_priority; p->next != NULL; p = p->next);
+				p->next = entry;
+			}
+
+		}
+	}
+}
+
+pthread_mutex_t event_handler_lock;
 
 void event_handler(int32_t UNUSED(signal)) {
 	struct stat pmt_info;
@@ -2237,7 +2324,7 @@ void event_handler(int32_t UNUSED(signal)) {
 					continue;
 				}
 
-				if ((time_t)pmt_info.st_mtime != demux[i].pmt_time) {
+				if (pmt_info.st_mtime != demux[i].pmt_time) {
 					cs_log("Stopping demux for pmt file %s", dest);
 				 	dvbapi_stop_descrambling(i);
 				}
@@ -2282,7 +2369,7 @@ void event_handler(int32_t UNUSED(signal)) {
 		int32_t found=0;
 		for (i=0;i<MAX_DEMUX;i++) {
 			if (strcmp(demux[i].pmt_file, dp->d_name)==0) {
-				if ((time_t)pmt_info.st_mtime == demux[i].pmt_time) {
+				if (pmt_info.st_mtime == demux[i].pmt_time) {
 				 	found=1;
 					continue;
 				}
@@ -2344,7 +2431,7 @@ void event_handler(int32_t UNUSED(signal)) {
 #endif
 		if (pmt_id>=0) {
 			cs_strncpy(demux[pmt_id].pmt_file, dp->d_name, sizeof(demux[pmt_id].pmt_file));
-			demux[pmt_id].pmt_time = (time_t)pmt_info.st_mtime;
+			demux[pmt_id].pmt_time = pmt_info.st_mtime;
 		}
 
 		if (cfg.dvbapi_pmtmode == 3) {
@@ -2359,7 +2446,7 @@ void event_handler(int32_t UNUSED(signal)) {
 void *dvbapi_event_thread(void *cli) {
 	struct s_client * client = (struct s_client *) cli;
 	pthread_setspecific(getclient, client);
-	set_thread_name(__func__);
+
 	while(1) {
 		cs_sleepms(750);
 		event_handler(0);
@@ -2587,7 +2674,6 @@ static void * dvbapi_main_local(void *cli) {
 	return azbox_main_thread(cli);
 #endif
 #ifdef WITH_MCA
-	selected_box = selected_api = 0; // Prevent compiler warning about out of bounds array access
 	return mca_main_thread(cli);
 #endif
 
@@ -2723,7 +2809,7 @@ static void * dvbapi_main_local(void *cli) {
 				if (type[i]==1) {
 					if (pfd2[i].fd==listenfd) {
 						clilen = sizeof(servaddr);
-						connfd = accept(listenfd, (struct sockaddr *)&servaddr, (socklen_t *)&clilen);
+						connfd = accept(listenfd, (struct sockaddr_un *)&servaddr, (socklen_t *)&clilen);
 						cs_debug_mask(D_DVBAPI, "new socket connection fd: %d", connfd);
 
 						disable_pmt_files=1;
@@ -3008,7 +3094,9 @@ void dvbapi_send_dcw(struct s_client *client, ECM_REQUEST *er)
 							else
 								fprintf(ecmtxt, "from: local\n");
 						fprintf(ecmtxt, "protocol: %s\n", reader_get_type_desc(er->selected_reader, 1));
-						fprintf(ecmtxt, "hops: %d\n", er->selected_reader->currenthops);
+#ifdef MODULE_CCCAM
+						fprintf(ecmtxt, "hops: %d\n", er->selected_reader->cc_currenthops);
+#endif
 						}
 					    }else{
 						if (er->selected_reader) {
@@ -3017,7 +3105,9 @@ void dvbapi_send_dcw(struct s_client *client, ECM_REQUEST *er)
 							else
 								fprintf(ecmtxt, "address: local\n");
 						fprintf(ecmtxt, "using: %s\n", reader_get_type_desc(er->selected_reader, 1));
-						fprintf(ecmtxt, "hops: %d\n", er->selected_reader->currenthops);
+#ifdef MODULE_CCCAM
+						fprintf(ecmtxt, "hops: %d\n", er->selected_reader->cc_currenthops);
+#endif
 					    	}
 					    }
 						break;
@@ -3060,11 +3150,11 @@ void dvbapi_send_dcw(struct s_client *client, ECM_REQUEST *er)
 	}
 }
 
-static void * dvbapi_handler(struct s_client * cl, uchar* UNUSED(mbuf), int32_t module_idx) {
+static void * dvbapi_handler(struct s_client * cl, uchar* UNUSED(mbuf), int32_t len) {
 	//cs_log("dvbapi loaded fd=%d", idx);
 	if (cfg.dvbapi_enabled == 1) {
 		cl = create_client(get_null_ip());
-		cl->module_idx = module_idx;
+		cl->ctyp = len;
 		cl->typ='c';
 		int32_t ret = pthread_create(&cl->thread, NULL, dvbapi_main_local, (void*) cl);
 		if(ret){
@@ -3086,6 +3176,7 @@ void module_dvbapi(struct s_module *ph)
 	ph->desc="dvbapi";
 	ph->type=MOD_CONN_SERIAL;
 	ph->listenertype = LIS_DVBAPI;
+	ph->multi=1;
 	ph->s_handler=dvbapi_handler;
 	ph->send_dcw=dvbapi_send_dcw;
 }

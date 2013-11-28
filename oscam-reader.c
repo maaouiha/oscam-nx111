@@ -2,123 +2,12 @@
 #include "module-cccam.h"
 #include "module-led.h"
 #include "module-stat.h"
-#include "oscam-chk.h"
 #include "oscam-client.h"
-#include "oscam-ecm.h"
-#include "oscam-lock.h"
 #include "oscam-net.h"
 #include "oscam-reader.h"
 #include "oscam-string.h"
 #include "oscam-time.h"
-#include "oscam-work.h"
 #include "reader-common.h"
-
-extern CS_MUTEX_LOCK system_lock;
-extern struct s_cardsystem cardsystems[CS_MAX_MOD];
-
-const char *RDR_CD_TXT[] = {
-	"cd", "dsr", "cts", "ring", "none",
-	"gpio1", "gpio2", "gpio3", "gpio4", "gpio5", "gpio6", "gpio7",
-	NULL
-};
-
-struct s_cardsystem *get_cardsystem_by_caid(uint16_t caid) {
-	int32_t i, j;
-	for (i = 0; i < CS_MAX_MOD; i++) {
-		if (cardsystems[i].caids) {
-			for (j = 0; j < 2; j++) {
-				uint16_t cs_caid = cardsystems[i].caids[j];
-				if (cs_caid == caid || cs_caid == caid >> 8)
-					return &cardsystems[i];
-			}
-		}
-	}
-	return NULL;
-}
-
-struct s_reader *get_reader_by_label(char *lbl)
-{
-	struct s_reader *rdr;
-	LL_ITER itr = ll_iter_create(configured_readers);
-	while ((rdr = ll_iter_next(&itr))) {
-		if (streq(lbl, rdr->label))
-			break;
-	}
-	return rdr;
-}
-
-char *reader_get_type_desc(struct s_reader * rdr, int32_t extended)
-{
-	char *desc = "unknown";
-	if (rdr->crdr.desc)
-		return rdr->crdr.desc;
-	if (is_network_reader(rdr) || rdr->typ == R_SERIAL) {
-		if (rdr->ph.desc)
-			desc = rdr->ph.desc;
-	}
-	if (rdr->typ == R_NEWCAMD && rdr->ncd_proto == NCD_524)
-		desc = "newcamd524";
-	else if (extended && rdr->typ == R_CCCAM && cccam_client_extended_mode(rdr->client)) {
-		desc = "cccam ext";
-	}
-	return desc;
-}
-
-bool hexserialset(struct s_reader *rdr)
-{
-	int i;
-	if (!rdr)
-		return false;
-	for (i = 0; i < 8; i++) {
-		if (rdr->hexserial[i])
-			return true;
-	}
-	return false;
-}
-
-void hexserial_to_newcamd(uchar *source, uchar *dest, uint16_t caid)
-{
-	if (caid == 0x5581 || caid == 0x4aee) { // Bulcrypt
-		dest[0] = 0x00;
-		dest[1] = 0x00;
-		memcpy(dest + 2, source, 4);
-		return;
-	}
-	caid = caid >> 8;
-	if (caid == 0x17 || caid == 0x06) { // Betacrypt or Irdeto
-		// only 4 Bytes Hexserial for newcamd clients (Hex Base + Hex Serial)
-		// first 2 Byte always 00
-		dest[0]=0x00; //serial only 4 bytes
-		dest[1]=0x00; //serial only 4 bytes
-		// 1 Byte Hex Base (see reader-irdeto.c how this is stored in "source")
-		dest[2]=source[3];
-		// 3 Bytes Hex Serial (see reader-irdeto.c how this is stored in "source")
-		dest[3]=source[0];
-		dest[4]=source[1];
-		dest[5]=source[2];
-	} else if (caid == 0x05 || caid == 0x0D) {
-		dest[0] = 0x00;
-		memcpy(dest + 1, source, 5);
-	} else {
-		memcpy(dest, source, 6);
-	}
-}
-
-void newcamd_to_hexserial(uchar *source, uchar *dest, uint16_t caid)
-{
-	caid = caid >> 8;
-	if (caid == 0x17 || caid == 0x06) { // Betacrypt or Irdeto
-		memcpy(dest, source+3, 3);
-		dest[3] = source[2];
-		dest[4] = 0;
-		dest[5] = 0;
-	} else if (caid == 0x05 || caid == 0x0D) {
-		memcpy(dest, source+1, 5);
-		dest[5] = 0;
-	} else {
-		memcpy(dest, source, 6);
-	}
-}
 
 /**
  * add one entitlement item to entitlements of reader.
@@ -292,21 +181,22 @@ int32_t network_tcp_connection_open(struct s_reader *rdr)
 	int32_t flag = 1;
 	setsockopt(client->udp_fd, IPPROTO_TCP, TCP_NODELAY, (void *)&flag, sizeof(flag));
 
-	memset((char *)&loc_sa,0,sizeof(loc_sa));
-	loc_sa.sin_family = AF_INET;
-	if (IP_ISSET(cfg.srvip))
-		IP_ASSIGN(SIN_GET_ADDR(loc_sa), cfg.srvip);
-	else
-		loc_sa.sin_addr.s_addr = INADDR_ANY;
+	if (client->reader->l_port>0) {
+		memset((char *)&loc_sa,0,sizeof(loc_sa));
+		loc_sa.sin_family = AF_INET;
+		if (IP_ISSET(cfg.srvip))
+			IP_ASSIGN(SIN_GET_ADDR(loc_sa), cfg.srvip);
+		else
+			loc_sa.sin_addr.s_addr = INADDR_ANY;
 
-	if (client->reader->l_port)
 		loc_sa.sin_port = htons(client->reader->l_port);
-	if (bind(client->udp_fd, (struct sockaddr *)&loc_sa, sizeof (loc_sa))<0) {
-		rdr_log(rdr, "bind failed (errno=%d %s)", errno, strerror(errno));
-		close(client->udp_fd);
-		client->udp_fd = 0;
-		block_connect(rdr);
-		return -1;
+		if (bind(client->udp_fd, (struct sockaddr *)&loc_sa, sizeof (loc_sa))<0) {
+			rdr_log(rdr, "bind failed (errno=%d %s)", errno, strerror(errno));
+			close(client->udp_fd);
+			client->udp_fd = 0;
+			block_connect(rdr);
+			return -1;
+		}
 	}
 
 #ifdef IPV6SUPPORT
@@ -404,10 +294,38 @@ void network_tcp_connection_close(struct s_reader *reader, char *reason)
 			cl->ecmtask[i].rc = 0;
 		}
 	}
-	// newcamd message ids are stored as a reference in ecmtask[].idx 
- 	// so we need to reset them aswell 
-	if (reader->typ == R_NEWCAMD) 
-		cl->ncd_msgid = 0; 
+}
+
+void casc_do_sock_log(struct s_reader * reader)
+{
+  int32_t i, idx;
+  uint16_t caid, srvid;
+  uint32_t provid;
+  struct s_client *cl = reader->client;
+
+  if(!cl) return;
+
+  idx=reader->ph.c_recv_log(&caid, &provid, &srvid);
+  cl->last=time((time_t*)0);
+  if (idx<0) return;        // no dcw-msg received
+
+  if(!cl->ecmtask) {
+    rdr_log(reader, "WARNING: ecmtask not a available");
+    return;
+  }
+
+  for (i = 0; i < cfg.max_pending; i++)
+  {
+    if (  (cl->ecmtask[i].rc>=10)
+       && (cl->ecmtask[i].idx==idx)
+       && (cl->ecmtask[i].caid==caid)
+       && (cl->ecmtask[i].prid==provid)
+       && (cl->ecmtask[i].srvid==srvid))
+    {
+      casc_check_dcw(reader, i, 0, cl->ecmtask[i].cw);  // send "not found"
+      break;
+    }
+  }
 }
 
 int32_t casc_process_ecm(struct s_reader * reader, ECM_REQUEST *er)
@@ -486,6 +404,19 @@ int32_t casc_process_ecm(struct s_reader * reader, ECM_REQUEST *er)
 	return(rc);
 }
 
+static int32_t reader_store_emm(uchar type, uchar *emmd5)
+{
+  int32_t rc;
+  struct s_client *cl = cur_client();
+  memcpy(cl->emmcache[cl->rotate].emmd5, emmd5, CS_EMMSTORESIZE);
+  cl->emmcache[cl->rotate].type=type;
+  cl->emmcache[cl->rotate].count=1;
+//  cs_debug_mask(D_READER, "EMM stored (index %d)", rotate);
+  rc=cl->rotate;
+  cl->rotate=(++cl->rotate < CS_EMMCACHESIZE)?cl->rotate:0;
+  return(rc);
+}
+
 void reader_get_ecm(struct s_reader * reader, ECM_REQUEST *er)
 {
 	struct s_client *cl = reader->client;
@@ -528,6 +459,105 @@ void reader_get_ecm(struct s_reader * reader, ECM_REQUEST *er)
 	}
 
 	cardreader_process_ecm(reader, cl, er);
+}
+
+void reader_log_emm(struct s_reader * reader, EMM_PACKET *ep, int32_t i, int32_t rc, struct timeb *tps) {
+	char *rtxt[] = { "error",
+			is_cascading_reader(reader) ? "sent" : "written", "skipped",
+			"blocked" };
+	char *typedesc[] = { "unknown", "unique", "shared", "global" };
+	struct s_client *cl = reader->client;
+	struct timeb tpe;
+
+	if (reader->logemm & (1 << rc)) {
+		cs_ftime(&tpe);
+		if (!tps)
+			tps = &tpe;
+
+		rdr_log(reader, "%s emmtype=%s, len=%d, idx=%d, cnt=%d: %s (%ld ms)",
+				username(ep->client), typedesc[cl->emmcache[i].type], ep->emm[2],
+				i, cl->emmcache[i].count, rtxt[rc],
+				1000 * (tpe.time - tps->time) + tpe.millitm - tps->millitm);
+	}
+
+	if (rc) {
+		cl->lastemm = time((time_t*) 0);
+		led_status_emm_ok();
+	}
+
+#if defined(WEBIF) || defined(LCDSUPPORT)
+	//counting results
+	switch (rc) {
+	case 0:
+		reader->emmerror[ep->type]++;
+		break;
+	case 1:
+		reader->emmwritten[ep->type]++;
+		break;
+	case 2:
+		reader->emmskipped[ep->type]++;
+		break;
+	case 3:
+		reader->emmblocked[ep->type]++;
+		break;
+	}
+#endif
+}
+
+int32_t reader_do_emm(struct s_reader * reader, EMM_PACKET *ep)
+{
+  int32_t i, rc, ecs;
+  unsigned char md5tmp[MD5_DIGEST_LENGTH];
+  struct timeb tps;
+  struct s_client *cl = reader->client;
+
+  if(!cl) return 0;
+
+    cs_ftime(&tps);
+
+	MD5(ep->emm, ep->emm[2], md5tmp);
+
+        for (i=ecs=0; (i<CS_EMMCACHESIZE) ; i++) {
+       	if (!memcmp(cl->emmcache[i].emmd5, md5tmp, CS_EMMSTORESIZE)) {
+			cl->emmcache[i].count++;
+			if (reader->cachemm){
+				if (cl->emmcache[i].count > reader->rewritemm){
+					ecs=2; //skip emm
+				}
+				else
+					ecs=1; //rewrite emm
+			}
+		break;
+		}
+	}
+
+	//Ecs=0 not found in cache
+	//Ecs=1 found in cache, rewrite emm
+	//Ecs=2 skip
+
+  if ((rc=ecs)<2)
+  {
+          if (is_cascading_reader(reader)) {
+                  rdr_debug_mask(reader, D_READER, "network emm reader");
+
+                  if (reader->ph.c_send_emm) {
+                          rc=reader->ph.c_send_emm(ep);
+                  } else {
+                          rdr_debug_mask(reader, D_READER, "send_emm() support missing");
+                          rc=0;
+                  }
+          } else {
+                  rdr_debug_mask(reader, D_READER, "local emm reader");
+                  rc = cardreader_do_emm(reader, ep);
+          }
+
+          if (!ecs)
+        	  i=reader_store_emm(ep->type, md5tmp);
+  }
+
+  reader_log_emm(reader, ep, i, rc, &tps);
+
+  return(rc);
 }
 
 void reader_do_card_info(struct s_reader * reader)
@@ -575,6 +605,9 @@ int32_t reader_init(struct s_reader *reader) {
 			return 0;
 		}
 
+		if ((reader->log_port) && (reader->ph.c_init_log))
+			reader->ph.c_init_log();
+
 		if (!cs_malloc(&client->ecmtask, cfg.max_pending * sizeof(ECM_REQUEST)))
 			return 0;
 
@@ -598,203 +631,90 @@ int32_t reader_init(struct s_reader *reader) {
 #if !defined(WITH_CARDREADER) && defined(WITH_STAPI)
 /* Dummy function stub for stapi compiles without cardreader as libstapi needs it. */
 int32_t ATR_InitFromArray(ATR *atr, const unsigned char atr_buffer[ATR_MAX_SIZE], uint32_t length) {
-	(void)atr;
-	(void)atr_buffer;
-	(void)length;
 	return 0;
 }
 #endif
 
-void cs_card_info(void)
+char *reader_get_type_desc(struct s_reader * rdr, int32_t extended)
 {
-	struct s_client *cl;
-	for (cl = first_client->next; cl ; cl = cl->next) {
-		if (cl->typ == 'r' && cl->reader)
-			add_job(cl, ACTION_READER_CARDINFO, NULL, 0);
+	char *desc = "unknown";
+	if (rdr->crdr.desc)
+		return rdr->crdr.desc;
+	if (is_network_reader(rdr) || rdr->typ == R_SERIAL) {
+		if (rdr->ph.desc)
+			desc = rdr->ph.desc;
 	}
+	if (rdr->typ == R_NEWCAMD && rdr->ncd_proto == NCD_524)
+		desc = "newcamd524";
+	else if (extended && rdr->typ == R_CCCAM && cccam_client_extended_mode(rdr->client)) {
+		desc = "cccam ext";
+	}
+	return desc;
 }
 
-
-/* Adds a reader to the list of active readers so that it can serve ecms. */
-static void add_reader_to_active(struct s_reader *rdr) {
-	struct s_reader *rdr2, *rdr_prv = NULL, *rdr_tmp = NULL;
-	int8_t at_first = 1;
-
-	if (rdr->next)
-		remove_reader_from_active(rdr);
-
-	cs_writelock(&readerlist_lock);
-	cs_writelock(&clientlist_lock);
-
-	// search configured position:
-	LL_ITER it = ll_iter_create(configured_readers);
-	while ((rdr2 = ll_iter_next(&it))) {
-		if (rdr2 == rdr)
-			break;
-		if (rdr2->client && rdr2->enable) {
-			rdr_prv = rdr2;
-			at_first = 0;
-		}
+void hexserial_to_newcamd(uchar *source, uchar *dest, uint16_t caid)
+{
+	if (caid == 0x5581 || caid == 0x4aee) { // Bulcrypt
+		dest[0] = 0x00;
+		dest[1] = 0x00;
+		memcpy(dest + 2, source, 4);
+		return;
 	}
-
-	// insert at configured position:
-	if (first_active_reader) {
-		if (at_first) {
-			rdr->next = first_active_reader;
-			first_active_reader = rdr;
-			//resort client list:
-			struct s_client *prev, *cl;
-			for (prev = first_client, cl = first_client->next;
-					prev->next != NULL; prev = prev->next, cl = cl->next)
-			{
-				if (rdr->client == cl)
-					break;
-			}
-			if (cl && rdr->client == cl) {
-				prev->next = cl->next; //remove client from list
-				cl->next = first_client->next;
-				first_client->next = cl;
-			}
-		} else {
-			for (rdr2=first_active_reader; rdr2->next && rdr2 != rdr_prv ; rdr2=rdr2->next) ; //search last element
-			rdr_prv = rdr2;
-			rdr_tmp = rdr2->next;
-			rdr2->next = rdr;
-			rdr->next = rdr_tmp;
-			//resort client list:
-			struct s_client *prev, *cl;
-			for (prev = first_client, cl = first_client->next;
-					prev->next != NULL; prev = prev->next, cl = cl->next)
-			{
-				if (rdr->client == cl)
-					break;
-			}
-			if (cl && rdr->client == cl) {
-				prev->next = cl->next; //remove client from list
-				cl->next = rdr_prv->client->next;
-				rdr_prv->client->next = cl;
-			}
-		}
+	caid = caid >> 8;
+	if (caid == 0x17 || caid == 0x06) { // Betacrypt or Irdeto
+		// only 4 Bytes Hexserial for newcamd clients (Hex Base + Hex Serial)
+		// first 2 Byte always 00
+		dest[0]=0x00; //serial only 4 bytes
+		dest[1]=0x00; //serial only 4 bytes
+		// 1 Byte Hex Base (see reader-irdeto.c how this is stored in "source")
+		dest[2]=source[3];
+		// 3 Bytes Hex Serial (see reader-irdeto.c how this is stored in "source")
+		dest[3]=source[0];
+		dest[4]=source[1];
+		dest[5]=source[2];
+	} else if (caid == 0x05 || caid == 0x0D) {
+		dest[0] = 0x00;
+		memcpy(dest + 1, source, 5);
 	} else {
-		first_active_reader = rdr;
+		memcpy(dest, source, 6);
 	}
-	rdr->active = 1;
-	cs_writeunlock(&clientlist_lock);
-	cs_writeunlock(&readerlist_lock);
 }
 
-/* Removes a reader from the list of active readers so that no ecms can be requested anymore. */
-void remove_reader_from_active(struct s_reader *rdr) {
-	struct s_reader *rdr2, *prv = NULL;
-	//rdr_log(rdr, "CHECK: REMOVE READER FROM ACTIVE");
-	cs_writelock(&readerlist_lock);
-	for (rdr2 = first_active_reader; rdr2 ; prv = rdr2, rdr2 = rdr2->next) {
-		if (rdr2 == rdr) {
-			if (prv) prv->next = rdr2->next;
-			else first_active_reader = rdr2->next;
-			break;
-		}
+void newcamd_to_hexserial(uchar *source, uchar *dest, uint16_t caid)
+{
+	caid = caid >> 8;
+	if (caid == 0x17 || caid == 0x06) { // Betacrypt or Irdeto
+		memcpy(dest, source+3, 3);
+		dest[3] = source[2];
+		dest[4] = 0;
+		dest[5] = 0;
+	} else if (caid == 0x05 || caid == 0x0D) {
+		memcpy(dest, source+1, 5);
+		dest[5] = 0;
+	} else {
+		memcpy(dest, source, 6);
 	}
-	rdr->next = NULL;
-	rdr->active = 0;
-	cs_writeunlock(&readerlist_lock);
 }
 
-/* Starts or restarts a cardreader without locking. If restart=1, the existing thread is killed before restarting,
-   if restart=0 the cardreader is only started. */
-static int32_t restart_cardreader_int(struct s_reader *rdr, int32_t restart) {
-	struct s_client *cl = rdr->client;
-	if (restart) {
-		remove_reader_from_active(rdr); // remove from list
-		kill_thread(cl); // kill old thread
-		cs_sleepms(500);
-	}
-
-	while (restart && is_valid_client(cl)) {
-		// If we quick disable+enable a reader (webif), remove_reader_from_active is called from
-		// cleanup. this could happen AFTER reader is restarted, so oscam crashes or reader is hidden
-		// rdr_log(rdr, "CHECK: WAITING FOR CLEANUP");
-		cs_sleepms(500);
-	}
-
-	rdr->client = NULL;
-	rdr->tcp_connected = 0;
-	rdr->card_status = UNKNOWN;
-	rdr->tcp_block_delay = 100;
-	cs_ftime(&rdr->tcp_block_connect_till);
-
-	if (rdr->device[0] && is_cascading_reader(rdr)) {
-		if (!rdr->ph.num) {
-			rdr_log(rdr, "Protocol Support missing. (typ=%d)", rdr->typ);
-			return 0;
-		}
-		rdr_debug_mask(rdr, D_TRACE, "protocol: %s", rdr->ph.desc);
-	}
-
-	if (!rdr->enable)
-		return 0;
-
-	if (rdr->device[0]) {
-		if (restart) {
-			rdr_log(rdr, "Restarting reader");
-		}
-		cl = create_client(first_client->ip);
-		if (cl == NULL)
-			return 0;
-		cl->reader  =rdr;
-		rdr_log(rdr, "creating thread for device %s", rdr->device);
-
-		cl->sidtabs.ok = rdr->sidtabs.ok;
-		cl->sidtabs.no = rdr->sidtabs.no;
-		cl->grp = rdr->grp;
-
-		rdr->client = cl;
-
-		cl->typ='r';
-
-		add_job(cl, ACTION_READER_INIT, NULL, 0);
-		add_reader_to_active(rdr);
-
-		return 1;
-	}
-	return 0;
-}
-
-/* Starts or restarts a cardreader with locking. If restart=1, the existing thread is killed before restarting,
-   if restart=0 the cardreader is only started. */
-int32_t restart_cardreader(struct s_reader *rdr, int32_t restart) {
-	cs_writelock(&system_lock);
-	int32_t result = restart_cardreader_int(rdr, restart);
-	cs_writeunlock(&system_lock);
-	return result;
-}
-
-void init_cardreader(void) {
-	cs_debug_mask(D_TRACE, "cardreader: Initializing");
-	cs_writelock(&system_lock);
+struct s_reader *get_reader_by_label(char *lbl)
+{
 	struct s_reader *rdr;
-
-	cardreader_init_locks();
-
 	LL_ITER itr = ll_iter_create(configured_readers);
-	while((rdr = ll_iter_next(&itr))) {
-		if (rdr->enable) {
-			restart_cardreader_int(rdr, 0);
-		}
+	while ((rdr = ll_iter_next(&itr))) {
+		if (streq(lbl, rdr->label))
+			break;
 	}
-
-	load_stat_from_file();
-	cs_writeunlock(&system_lock);
+	return rdr;
 }
 
-void kill_all_readers(void) {
-	struct s_reader *rdr;
-	for (rdr = first_active_reader; rdr; rdr = rdr->next) {
-		struct s_client *cl = rdr->client;
-		if (!cl)
-			continue;
-		rdr_log(rdr, "Killing reader");
-		kill_thread(cl);
+bool hexserialset(struct s_reader *rdr)
+{
+	int i;
+	if (!rdr)
+		return false;
+	for (i = 0; i < 8; i++) {
+		if (rdr->hexserial[i])
+			return true;
 	}
-	first_active_reader = NULL;
+	return false;
 }

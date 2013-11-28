@@ -1,10 +1,8 @@
 #include "globals.h"
 #ifdef MODULE_RADEGAST
 #include "oscam-client.h"
-#include "oscam-ecm.h"
 #include "oscam-net.h"
 #include "oscam-string.h"
-#include "oscam-reader.h"
 
 static int32_t radegast_send(struct s_client * client, uchar *buf)
 {
@@ -237,17 +235,21 @@ static void radegast_server_init(struct s_client *cl) {
 
 void module_radegast(struct s_module *ph)
 {
-  ph->ptab.nports = 1;
-  ph->ptab.ports[0].s_port = cfg.rad_port;
+  static PTAB ptab; //since there is always only 1 radegast server running, this is threadsafe
+  ptab.ports[0].s_port = cfg.rad_port;
+  ph->ptab = &ptab;
+  ph->ptab->nports = 1;
 
   ph->desc="radegast";
   ph->type=MOD_CONN_TCP;
   ph->listenertype = LIS_RADEGAST;
+  ph->multi=0;
   IP_ASSIGN(ph->s_ip, cfg.rad_srvip);
   ph->s_handler=radegast_server;
   ph->s_init=radegast_server_init;
   ph->recv=radegast_recv;
   ph->send_dcw=radegast_send_dcw;
+  ph->c_multi=0;
   ph->c_init=radegast_cli_init;
   ph->c_recv_chk=radegast_recv_chk;
   ph->c_send_ecm=radegast_send_ecm;

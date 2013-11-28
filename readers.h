@@ -14,7 +14,5 @@ void reader_dre(struct s_cardsystem *);
 void reader_tongfang(struct s_cardsystem *);
 void reader_streamguard(struct s_cardsystem *);
 void reader_bulcrypt(struct s_cardsystem *);
-void reader_griffin(struct s_cardsystem *);
-void reader_dgcrypt(struct s_cardsystem *);
 
 #endif

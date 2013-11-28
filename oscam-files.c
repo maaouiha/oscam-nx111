@@ -5,7 +5,6 @@
 #include "oscam-string.h"
 
 extern CS_MUTEX_LOCK readdir_lock;
-extern char cs_tmpdir[200];
 
 /* Gets the tmp dir */
 char *get_tmp_dir(void) {
@@ -32,14 +31,6 @@ char *get_tmp_dir(void) {
 #endif
 	mkdir(cs_tmpdir, S_IRWXU);
 	return cs_tmpdir;
-}
-
-char *get_tmp_dir_filename(char *dest, size_t destlen, const char *filename) {
-	char *tmp_dir = get_tmp_dir();
-	const char *slash = "/";
-	if (tmp_dir[strlen(tmp_dir) - 1] == '/') slash = "";
-	snprintf(dest, destlen, "%s%s%s", tmp_dir, slash, filename);
-	return dest;
 }
 
 /* Drop-in replacement for readdir_r as some plattforms strip the function from their libc.

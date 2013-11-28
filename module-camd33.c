@@ -2,8 +2,6 @@
 #ifdef MODULE_CAMD33
 #include "oscam-aes.h"
 #include "oscam-client.h"
-#include "oscam-ecm.h"
-#include "oscam-emm.h"
 #include "oscam-net.h"
 #include "oscam-string.h"
 
@@ -17,7 +15,7 @@ static int32_t camd33_send(uchar *buf, int32_t ml)
   memset(buf+ml, 0, l-ml);
   cs_ddump_mask(D_CLIENT, buf, l, "send %d bytes to client", l);
   if (cur_client()->crypted)
-    aes_encrypt_idx(&cur_client()->aes_keys, buf, l);
+    aes_encrypt_idx(cur_client(), buf, l);
   return(send(cur_client()->pfd, buf, l, 0));
 }
 
@@ -29,7 +27,7 @@ static int32_t camd33_recv(struct s_client * client, uchar *buf, int32_t l)
   {
     client->last=time((time_t *) 0);
     if (client->crypted)
-      aes_encrypt_idx(&cur_client()->aes_keys, buf, n);
+      aes_encrypt_idx(cur_client(), buf, n);
   }
   cs_ddump_mask(D_CLIENT, buf, n, "received %d bytes from client", n);
   return(n);
@@ -78,7 +76,7 @@ static void camd33_auth_client(uchar *camdbug)
     cl->crypted = !check_ip(cfg.c33_plain, cl->ip);
 
   if (cl->crypted)
-    aes_set_key(&cl->aes_keys, (char *)cfg.c33_key);
+    aes_set_key(cl, (char *)cfg.c33_key);
 
   mbuf[0]=0;
   camd33_send(mbuf, 1);	// send login-request
@@ -164,14 +162,17 @@ static void camd33_server_init(struct s_client *UNUSED(client)) {
 
 void module_camd33(struct s_module *ph)
 {
-  cfg.c33_crypted = check_filled(cfg.c33_key, sizeof(cfg.c33_key));
-  ph->ptab.nports = 1;
-  ph->ptab.ports[0].s_port = cfg.c33_port;
+  static PTAB ptab; //since there is always only 1 camd33 server running, this is threadsafe
+  ptab.ports[0].s_port = cfg.c33_port;
+  ph->ptab = &ptab;
+  ph->ptab->nports = 1;
 
   ph->desc="camd33";
   ph->type=MOD_CONN_TCP;
   ph->large_ecm_support = 1;
   ph->listenertype = LIS_CAMD33TCP;
+  ph->logtxt=cfg.c33_crypted ? ", crypted" : ", UNCRYPTED!";
+  ph->multi=1;
   IP_ASSIGN(ph->s_ip, cfg.c33_srvip);
   ph->s_handler=camd33_server;
   ph->s_init=camd33_server_init;

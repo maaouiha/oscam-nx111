@@ -1,16 +1,16 @@
 #include "globals.h"
 #if defined MODULE_CAMD35 || defined MODULE_CAMD35_TCP
 
-#include "cscrypt/md5.h"
 #include "module-cacheex.h"
 #include "oscam-aes.h"
 #include "oscam-chk.h"
 #include "oscam-client.h"
-#include "oscam-ecm.h"
-#include "oscam-emm.h"
 #include "oscam-net.h"
 #include "oscam-string.h"
-#include "oscam-reader.h"
+
+extern struct s_module modules[CS_MAX_MOD];
+
+static int32_t logfd = 0;
 
 //CMD00 - ECM (request)
 //CMD01 - ECM (response)
@@ -51,7 +51,7 @@ static int32_t camd35_send(struct s_client *cl, uchar *buf, int32_t buflen)
 	i2b_buf(4, crc32(0L, sbuf+20, buflen), sbuf + 4);
 	l = boundary(4, l);
 	cs_ddump_mask(cl->typ == 'c'?D_CLIENT:D_READER, sbuf, l, "send %d bytes to %s", l, username(cl));
-	aes_encrypt_idx(&cl->aes_keys, sbuf, l);
+	aes_encrypt_idx(cl, sbuf, l);
 
 	int32_t status;
 	if (cl->is_udp) {
@@ -93,7 +93,7 @@ static int32_t camd35_auth_client(struct s_client *cl, uchar *ucrc)
       if (!rc) {
       	memcpy(cl->ucrc, ucrc, 4);
       	cs_strncpy((char *)cl->upwd, account->pwd, sizeof(cl->upwd));
-      	aes_set_key(&cl->aes_keys, (char *) MD5(cl->upwd, strlen((char *)cl->upwd), md5tmp));
+      	aes_set_key(cl, (char *) MD5(cl->upwd, strlen((char *)cl->upwd), md5tmp));
       	return 0;
 	  }
     }
@@ -124,7 +124,7 @@ static int32_t camd35_recv(struct s_client *client, uchar *buf, int32_t l)
 				memmove(buf, buf+4, rs-=4);
 				break;
 			case 2:
-				aes_decrypt(&client->aes_keys, buf, rs);
+				aes_decrypt(client, buf, rs);
 				if (rs!=boundary(4, rs))
 					cs_debug_mask(client->typ == 'c'?D_CLIENT:D_READER,
 							"WARNING: packet size has wrong decryption boundary");
@@ -144,7 +144,7 @@ static int32_t camd35_recv(struct s_client *client, uchar *buf, int32_t l)
 					len = recv(client->udp_fd, buf+32, n-32, 0); // read the rest of the packet
 					if (len>0) {
 						rs+=len;
-						aes_decrypt(&client->aes_keys, buf+32, len);
+						aes_decrypt(client, buf+32, len);
 					}
 				}
 
@@ -285,9 +285,9 @@ static void camd35_request_emm(ECM_REQUEST *er)
 			}
 		}
 		//we think client/server protocols should deliver all information, and only readers should discard EMM
-		mbuf[128] = (aureader->blockemm & EMM_GLOBAL && !(aureader->saveemm & EMM_GLOBAL)) ? 0: 1;
-		mbuf[129] = (aureader->blockemm & EMM_SHARED && !(aureader->saveemm & EMM_SHARED)) ? 0: 1;
-		mbuf[130] = (aureader->blockemm & EMM_UNIQUE && !(aureader->saveemm & EMM_UNIQUE)) ? 0: 1;
+		mbuf[128] = (aureader->blockemm & EMM_GLOBAL) ? 0: 1;
+		mbuf[129] = (aureader->blockemm & EMM_SHARED) ? 0: 1;
+		mbuf[130] = (aureader->blockemm & EMM_UNIQUE) ? 0: 1;
 		//mbuf[131] = aureader->card_system; //Cardsystem for Oscam client
 	}
 	else		// disable emm
@@ -386,6 +386,10 @@ static void camd35_process_emm(uchar *buf)
 	do_emm(cur_client(), &epg);
 }
 
+static void camd35_server_init(struct s_client * client) {
+	client->is_udp = (modules[client->ctyp].type == MOD_CONN_UDP);
+}
+
 static int32_t tcp_connect(struct s_client *cl)
 {
 	if (cl->is_udp) { // check for udp client
@@ -430,7 +434,7 @@ int32_t camd35_client_init(struct s_client *cl)
 	unsigned char md5tmp[MD5_DIGEST_LENGTH];
 	cs_strncpy((char *)cl->upwd, cl->reader->r_pwd, sizeof(cl->upwd));
 	i2b_buf(4, crc32(0L, MD5((unsigned char *)cl->reader->r_usr, strlen(cl->reader->r_usr), md5tmp), 16), cl->ucrc);
-	aes_set_key(&cl->aes_keys, (char *)MD5(cl->upwd, strlen((char *)cl->upwd), md5tmp));
+	aes_set_key(cl, (char *)MD5(cl->upwd, strlen((char *)cl->upwd), md5tmp));
 	cl->crypted=1;
 
 	cs_log("camd35 proxy %s:%d", cl->reader->device, cl->reader->r_port);
@@ -755,6 +759,41 @@ static void * camd35_server(struct s_client *client __attribute__((unused)), uch
 	return NULL; //to prevent compiler message
 }
 
+int32_t camd35_client_init_log(void)
+{
+  struct sockaddr_in loc_sa;
+  struct s_client *cl = cur_client();
+
+  if (cl->reader->log_port<=0)
+  {
+    cs_log("invalid port %d for camd3-loghost", cl->reader->log_port);
+    return(1);
+  }
+
+  memset((char *)&loc_sa,0,sizeof(loc_sa));
+  loc_sa.sin_family = AF_INET;
+  loc_sa.sin_addr.s_addr = INADDR_ANY;
+  loc_sa.sin_port = htons(cl->reader->log_port);
+
+  if ((logfd=socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP))<0)
+  {
+    cs_log("Socket creation failed (errno=%d %s)", errno, strerror(errno));
+    return(1);
+  }
+
+  if (bind(logfd, (struct sockaddr *)&loc_sa, sizeof(loc_sa))<0)
+  {
+    cs_log("bind failed (errno=%d %s)", errno, strerror(errno));
+    close(logfd);
+    return(1);
+  }
+
+  cs_log("camd3 loghost initialized (fd=%d, port=%d)",
+         logfd, cl->reader->log_port);
+
+  return(0);
+}
+
 static int32_t camd35_send_ecm(struct s_client *client, ECM_REQUEST *er, uchar *buf)
 {
 	static const char *typtext[]={"ok", "invalid", "sleeping"};
@@ -910,27 +949,65 @@ static int32_t camd35_recv_chk(struct s_client *client, uchar *dcw, int32_t *rc,
 	return(idx);
 }
 
+static int32_t camd35_recv_log(uint16_t *caid, uint32_t *provid, uint16_t *srvid)
+{
+  int32_t i;
+  uchar buf[512], *ptr, *ptr2;
+  char *saveptr1 = NULL;
+  uint16_t idx=0;
+  if (!logfd) return(-1);
+  if ((i=recv(logfd, buf, sizeof(buf), 0))<=0) return(-1);
+  buf[i]=0;
+
+  if (!(ptr=(uchar *)strstr((char *)buf, " -> "))) return(-1);
+  ptr+=4;
+  if (strstr((char *)ptr, " decoded ")) return(-1);	// skip "found"s
+  if (!(ptr2=(uchar *)strchr((char *)ptr, ' '))) return(-1);	// corrupt
+  *ptr2=0;
+
+  for (i=0, ptr2=(uchar *)strtok_r((char *)ptr, ":", &saveptr1); ptr2; i++, ptr2=(uchar *)strtok_r(NULL, ":", &saveptr1))
+  {
+    trim((char *)ptr2);
+    switch(i)
+    {
+      case 0: *caid  =cs_atoi((char *)ptr2, strlen((char *)ptr2)>>1, 0); break;
+      case 1: *provid=cs_atoi((char *)ptr2, strlen((char *)ptr2)>>1, 0); break;
+      case 2: *srvid =cs_atoi((char *)ptr2, strlen((char *)ptr2)>>1, 0); break;
+      case 3: idx    =cs_atoi((char *)ptr2, strlen((char *)ptr2)>>1, 0); break;
+    }
+    if (errno) return(-1);
+  }
+  return(idx&0x1FFF);
+}
+
 /*
  *	module definitions
  */
 #ifdef MODULE_CAMD35
 void module_camd35(struct s_module *ph)
 {
-  ph->ptab.nports = 1;
-  ph->ptab.ports[0].s_port = cfg.c35_port;
+  static PTAB ptab; //since there is always only 1 camd35 server running, this is threadsafe
+  ptab.ports[0].s_port = cfg.c35_port;
+  ph->ptab = &ptab;
+  ph->ptab->nports = 1;
 
   ph->desc="camd35";
   ph->type=MOD_CONN_UDP;
   ph->large_ecm_support = 1;
   ph->listenertype = LIS_CAMD35UDP;
+  ph->multi=1;
   IP_ASSIGN(ph->s_ip, cfg.c35_srvip);
   ph->s_handler=camd35_server;
+  ph->s_init=camd35_server_init;
   ph->recv=camd35_recv;
   ph->send_dcw=camd35_send_dcw;
+  ph->c_multi=1;
   ph->c_init=camd35_client_init;
   ph->c_recv_chk=camd35_recv_chk;
   ph->c_send_ecm=camd35_send_ecm;
   ph->c_send_emm=camd35_send_emm;
+  ph->c_init_log=camd35_client_init_log;
+  ph->c_recv_log=camd35_recv_log;
 #ifdef CS_CACHEEX
   ph->c_cache_push=camd35_cache_push_out;
   ph->c_cache_push_chk=camd35_cache_push_chk;
@@ -946,15 +1023,22 @@ void module_camd35_tcp(struct s_module *ph)
   ph->type=MOD_CONN_TCP;
   ph->large_ecm_support = 1;
   ph->listenertype = LIS_CAMD35TCP;
-  ph->ptab = cfg.c35_tcp_ptab;
+  ph->multi=1;
+  ph->ptab=&cfg.c35_tcp_ptab;
+  if (ph->ptab->nports==0)
+    ph->ptab->nports=1; // show disabled in log
   IP_ASSIGN(ph->s_ip, cfg.c35_tcp_srvip);
   ph->s_handler=camd35_server;
+  ph->s_init=camd35_server_init;
   ph->recv=camd35_recv;
   ph->send_dcw=camd35_send_dcw;
+  ph->c_multi=1;
   ph->c_init=camd35_client_init;
   ph->c_recv_chk=camd35_recv_chk;
   ph->c_send_ecm=camd35_send_ecm;
   ph->c_send_emm=camd35_send_emm;
+  ph->c_init_log=camd35_client_init_log;
+  ph->c_recv_log=camd35_recv_log;
 #ifdef CS_CACHEEX
   ph->c_cache_push=camd35_cache_push_out;
   ph->c_cache_push_chk=camd35_cache_push_chk;

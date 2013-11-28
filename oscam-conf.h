@@ -1,6 +1,10 @@
 #ifndef OSCAM_CONF_H
 #define OSCAM_CONF_H
 
+#include <stdio.h>
+#include <inttypes.h>
+#include <stdbool.h>
+
 #define MAXLINESIZE 16384
 
 enum opt_types {
@@ -11,7 +15,6 @@ enum opt_types {
 	OPT_UINT32,
 	OPT_STRING,
 	OPT_SSTRING,
-	OPT_HEX_ARRAY,
 	OPT_FUNC,
 	OPT_FUNC_EXTRA,
 	OPT_SAVE_FUNC,
@@ -30,7 +33,6 @@ struct config_list {
 		uint32_t		d_uint32;
 		char			*d_char;
 		long			d_extra;
-		uint32_t		array_size;
 	} def;
 	union {
 		void			(*process_fn)(const char *token, char *value, void *setting, FILE *config_file);
@@ -38,7 +40,6 @@ struct config_list {
 		bool			(*should_save_fn)(void *var);
 		void			(*fixup_fn)(void *var);
 	} ops;
-	void			(*free_value)(void *setting);
 };
 
 #define DEF_OPT_INT8(__name, __var_ofs, __default) \
@@ -90,31 +91,21 @@ struct config_list {
 		.def.d_char		= __default \
 	}
 
-#define DEF_OPT_HEX(__name, __var_ofs, __array_size) \
-	{ \
-		.opt_type		= OPT_HEX_ARRAY, \
-		.config_name	= __name, \
-		.var_offset		= __var_ofs, \
-		.def.array_size	= __array_size \
-	}
-
-#define DEF_OPT_FUNC(__name, __var_ofs, __process_fn, ...) \
+#define DEF_OPT_FUNC(__name, __var_ofs, __process_fn) \
 	{ \
 		.opt_type		= OPT_FUNC, \
 		.config_name	= __name, \
 		.var_offset		= __var_ofs, \
-		.ops.process_fn	= __process_fn, \
-		##__VA_ARGS__ \
+		.ops.process_fn	= __process_fn \
 	}
 
-#define DEF_OPT_FUNC_X(__name, __var_ofs, __process_fn_extra, __extra, ...) \
+#define DEF_OPT_FUNC_X(__name, __var_ofs, __process_fn_extra, __extra) \
 	{ \
 		.opt_type		= OPT_FUNC_EXTRA, \
 		.config_name	= __name, \
 		.var_offset		= __var_ofs, \
 		.ops.process_fn_extra	= __process_fn_extra, \
-		.def.d_extra	= __extra, \
-		##__VA_ARGS__ \
+		.def.d_extra	= __extra \
 	}
 
 #define DEF_OPT_SAVE_FUNC(__fn) \

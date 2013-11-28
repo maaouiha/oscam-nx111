@@ -1,10 +1,7 @@
 #include "globals.h"
 #ifdef READER_SECA
 #include "reader-common.h"
-
-struct seca_data {
-	bool valid_provider[CS_MAXPROV];
-};
+#include <stdlib.h>
 
 static uint64_t get_pbm(struct s_reader * reader, uint8_t idx)
 {
@@ -38,7 +35,7 @@ static int32_t set_provider_info(struct s_reader * reader, int32_t i)
   int32_t year, month, day;
   struct tm lt;
   time_t t;
-  bool valid = false;
+  int32_t valid=0;//0=false, 1=true
   char l_name[16+8+1]=", name: ";
   char tmp[9];
 
@@ -72,12 +69,11 @@ static int32_t set_provider_info(struct s_reader * reader, int32_t i)
   l_name[0]=(l_name[8]) ? ',' : 0;
   if (l_name[8])
 	  add_provider(0x0100, provid, l_name + 8, "", "");
-  struct seca_data *csystem_data = reader->csystem_data;
-  csystem_data->valid_provider[i] = valid;
+  reader->availkeys[i][0]=valid; //misusing availkeys to register validity of provider
   rdr_log (reader, "provider %d: %04X, valid: %i%s, expiry date: %4d/%02d/%02d",
          i+1, provid, valid, l_name, year, month, day);
   memcpy(&reader->sa[i][0], cta_res+18, 4);
-  if (valid) //if not expired
+  if (valid==1) //if not expired
     rdr_log_sensitive(reader, "SA: {%s}", cs_hexdump(0, cta_res+18, 4, tmp, sizeof(tmp)));
 
   // add entitlement to list
@@ -160,10 +156,6 @@ static int32_t seca_card_init(struct s_reader * reader, ATR *newatr)
 
   buf[0]=0x00;
   if ((atr[10]!=0x0e) || (atr[11]!=0x6c) || (atr[12]!=0xb6) || (atr[13]!=0xd6)) return ERROR;
-
-  if (!cs_malloc(&reader->csystem_data, sizeof(struct seca_data)))
-     return ERROR;
-
   switch(atr[7]<<8|atr[8])
   {
     case 0x5084: card="Generic"; break;
@@ -249,8 +241,7 @@ static int32_t seca_do_ecm(struct s_reader * reader, const ECM_REQUEST *er, stru
      return ERROR;
   }
 
-  struct seca_data *csystem_data = reader->csystem_data;
-  if ((er->ecm[7] & 0x0F) != 0x0E && !csystem_data->valid_provider[i]) // if expired and not using OP Key 0E
+  if ((er->ecm[7] & 0x0F) != 0x0E && reader->availkeys[i][0] == 0) // if expired and not using OP Key 0E
   {
      snprintf( ea->msglog, MSGLOGSIZE, "provider expired" );
      return ERROR;

@@ -1,10 +1,20 @@
 #include "globals.h"
-#include "module-gbox.h"
+
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <net/if_dl.h>
+#include <ifaddrs.h>
+#elif defined(__SOLARIS__)
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <sys/sockio.h>
+#else
+#include <net/if.h>
+#endif
+
 #include "oscam-aes.h"
 #include "oscam-conf.h"
 #include "oscam-conf-chk.h"
 #include "oscam-conf-mk.h"
-#include "oscam-config.h"
 #include "oscam-garbage.h"
 #include "oscam-lock.h"
 #include "oscam-reader.h"
@@ -12,8 +22,8 @@
 
 #define cs_srvr "oscam.server"
 
+extern struct s_module modules[CS_MAX_MOD];
 extern struct s_cardreader cardreaders[CS_MAX_MOD];
-extern char *RDR_CD_TXT[];
 
 static void reader_label_fn(const char *token, char *value, void *setting, FILE *f) {
 	struct s_reader *rdr = setting;
@@ -33,6 +43,128 @@ static void reader_label_fn(const char *token, char *value, void *setting, FILE 
 		return;
 	}
 	fprintf_conf(f, token, "%s\n", rdr->label);
+}
+
+static void mgencrypted_fn(const char *UNUSED(token), char *value, void *setting, FILE *UNUSED(f)) {
+	struct s_reader *rdr = setting;
+
+	if (value) {
+		uchar key[16];
+		uchar mac[6];
+		char tmp_dbg[13];
+		uchar *buf = NULL;
+		int32_t i, len = 0;
+		char *ptr, *saveptr1 = NULL;
+
+		memset(&key, 0, 16);
+		memset(&mac, 0, 6);
+
+		for (i = 0, ptr = strtok_r(value, ",", &saveptr1); (i < 2) && (ptr); ptr = strtok_r(NULL, ",", &saveptr1), i++) {
+			trim(ptr);
+			switch(i) {
+			case 0:
+				len = strlen(ptr) / 2 + (16 - (strlen(ptr) / 2) % 16);
+				if (!cs_malloc(&buf, len)) return;
+				key_atob_l(ptr, buf, strlen(ptr));
+				cs_log("enc %d: %s", len, ptr);
+				break;
+
+			case 1:
+				key_atob_l(ptr, mac, 12);
+				cs_log("mac: %s", ptr);
+				break;
+			}
+		}
+
+		if (!memcmp(mac, "\x00\x00\x00\x00\x00\x00", 6)) {
+#if defined(__APPLE__) || defined(__FreeBSD__)
+			// no mac address specified so use mac of en0 on local box
+			struct ifaddrs *ifs, *current;
+
+			if (getifaddrs(&ifs) == 0)
+			{
+				for (current = ifs; current != 0; current = current->ifa_next)
+				{
+					if (current->ifa_addr->sa_family == AF_LINK && strcmp(current->ifa_name, "en0") == 0)
+					{
+						struct sockaddr_dl *sdl = (struct sockaddr_dl *)current->ifa_addr;
+						memcpy(mac, LLADDR(sdl), sdl->sdl_alen);
+						break;
+					}
+				}
+				freeifaddrs(ifs);
+			}
+#elif defined(__SOLARIS__)
+			// no mac address specified so use first filled mac
+			int32_t j, sock, niccount;
+			struct ifreq nicnumber[16];
+			struct ifconf ifconf;
+			struct arpreq arpreq;
+
+			if ((sock=socket(AF_INET,SOCK_DGRAM,0)) > -1){
+				ifconf.ifc_buf = (caddr_t)nicnumber;
+				ifconf.ifc_len = sizeof(nicnumber);
+				if (!ioctl(sock,SIOCGIFCONF,(char*)&ifconf)){
+					niccount = ifconf.ifc_len/(sizeof(struct ifreq));
+					for(i = 0; i < niccount, ++i){
+						memset(&arpreq, 0, sizeof(arpreq));
+						((struct sockaddr_in*)&arpreq.arp_pa)->sin_addr.s_addr = ((struct sockaddr_in*)&nicnumber[i].ifr_addr)->sin_addr.s_addr;
+						if (!(ioctl(sock,SIOCGARP,(char*)&arpreq))){
+							for (j = 0; j < 6; ++j)
+								mac[j] = (unsigned char)arpreq.arp_ha.sa_data[j];
+							if(check_filled(mac, 6) > 0) break;
+						}
+					}
+				}
+				close(sock);
+			}
+#else
+			// no mac address specified so use mac of eth0 on local box
+			int32_t fd = socket(PF_INET, SOCK_STREAM, 0);
+
+			struct ifreq ifreq;
+			memset(&ifreq, 0, sizeof(ifreq));
+			snprintf(ifreq.ifr_name, sizeof(ifreq.ifr_name), "eth0");
+
+			ioctl(fd, SIOCGIFHWADDR, &ifreq);
+			memcpy(mac, ifreq.ifr_ifru.ifru_hwaddr.sa_data, 6);
+
+			close(fd);
+#endif
+			cs_debug_mask(D_TRACE, "Determined local mac address for mg-encrypted as %s", cs_hexdump(1, mac, 6, tmp_dbg, sizeof(tmp_dbg)));
+		}
+
+		// decrypt encrypted mgcamd gbox line
+		for (i = 0; i < 6; i++)
+			key[i * 2] = mac[i];
+
+		AES_KEY aeskey;
+		AES_set_decrypt_key(key, 128, &aeskey);
+		for (i = 0; i < len; i+=16)
+			AES_decrypt(buf + i,buf + i, &aeskey);
+
+		// parse d-line
+		for (i = 0, ptr = strtok_r((char *)buf, " {", &saveptr1); (i < 5) && (ptr); ptr = strtok_r(NULL, " {", &saveptr1), i++) {
+			trim(ptr);
+			switch (i) {
+			case 1:    // hostname
+				cs_strncpy(rdr->device, ptr, sizeof(rdr->device));
+				break;
+			case 2:   // local port
+				cfg.gbox_port = atoi(ptr);  // ***WARNING CHANGE OF GLOBAL LISTEN PORT FROM WITHIN READER!!!***
+				break;
+			case 3:   // remote port
+				rdr->r_port = atoi(ptr);
+				break;
+			case 4:   // password
+				cs_strncpy(rdr->r_pwd, ptr, sizeof(rdr->r_pwd));
+				break;
+			}
+		}
+
+		free(buf);
+		return;
+	}
 }
 
 static void ecmwhitelist_fn(const char *token, char *value, void *setting, FILE *f) {
@@ -323,20 +455,81 @@ static void device_fn(const char *token, char *value, void *setting, FILE *f) {
 	fprintf(f, "\n");
 }
 
-static void reader_services_fn(const char *token, char *value, void *setting, FILE *f) {
-	services_fn(token, value, setting, f);
+static void key_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_reader *rdr = setting;
 	if (value) {
-		struct s_reader *rdr = container_of(setting, struct s_reader, sidtabs);
-		rdr->changes_since_shareupdate = 1;
+		memset(rdr->ncd_key, 0, sizeof(rdr->ncd_key));
+		if (strlen(value) == 0)
+			return;
+		if (key_atob_l(value, rdr->ncd_key, 28)) {
+			fprintf(stderr, "reader key parse error, %s=%s\n", token, value);
+			memset(rdr->ncd_key, 0, sizeof(rdr->ncd_key));
+		}
+		return;
+	}
+	if (rdr->ncd_key[0] || rdr->ncd_key[13] || cfg.http_full_cfg) {
+		fprintf_conf(f, token, "%s", ""); // it should not have \n at the end
+		if (rdr->ncd_key[0] || rdr->ncd_key[13]) {
+			int j;
+			for (j = 0; j < 14; j++) {
+				fprintf(f, "%02X", rdr->ncd_key[j]);
+			}
+		}
+		fprintf(f, "\n");
 	}
 }
 
-static void reader_caid_fn(const char *token, char *value, void *setting, FILE *f) {
-	check_caidtab_fn(token, value, setting, f);
+static void services_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_reader *rdr = setting;
 	if (value) {
-		struct s_reader *rdr = container_of(setting, struct s_reader, ctab);
+		if (strlen(value)) {
+			chk_services(value, &rdr->sidtabok, &rdr->sidtabno);
+		} else {
+			rdr->sidtabok = 0;
+			rdr->sidtabno = 0;
+		}
 		rdr->changes_since_shareupdate = 1;
+		return;
 	}
+	value = mk_t_service((uint64_t)rdr->sidtabok, (uint64_t)rdr->sidtabno);
+	if (strlen(value) > 0 || cfg.http_full_cfg)
+		fprintf_conf(f, token, "%s\n", value);
+	free_mk_t(value);
+}
+
+#ifdef CS_CACHEEX
+static void cacheex_ecm_filter_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_reader *rdr = setting;
+	if (value) {
+		if (strlen(value)) {
+			chk_hitvaluetab(value, &rdr->cacheex.filter_caidtab);
+		} else {
+			clear_csptab(&rdr->cacheex.filter_caidtab);
+		}
+		return;
+	}
+	value = mk_t_hitvaluetab(&rdr->cacheex.filter_caidtab);
+	if (strlen(value) > 0 || cfg.http_full_cfg)
+		fprintf_conf(f, token, "%s\n", value);
+	free_mk_t(value);
+}
+#endif
+
+static void caid_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_reader *rdr = setting;
+	if (value) {
+		if (strlen(value)) {
+			chk_caidtab(value, &rdr->ctab);
+		} else {
+			clear_caidtab(&rdr->ctab);
+		}
+		rdr->changes_since_shareupdate = 1;
+		return;
+	}
+	value = mk_t_caidtab(&rdr->ctab);
+	if (strlen(value) > 0 || cfg.http_full_cfg)
+		fprintf_conf(f, token, "%s\n", value);
+	free_mk_t(value);
 }
 
 static void boxid_fn(const char *token, char *value, void *setting, FILE *f) {
@@ -451,39 +644,43 @@ static void detect_fn(const char *token, char *value, void *setting, FILE *f) {
 	fprintf_conf(f, token, "%s%s\n", rdr->detect & 0x80 ? "!" : "", RDR_CD_TXT[rdr->detect & 0x7f]);
 }
 
-void ftab_fn(const char *token, char *value, void *setting, long ftab_type, FILE *f) {
-	const char *zType = NULL, *zName = NULL, *zFiltNamef = NULL;
-	struct s_reader *rdr = NULL;
-	FTAB *ftab = setting;
-
-	if (ftab_type & FTAB_ACCOUNT) {
-		struct s_auth *account = NULL;
-		zType = "account";
-		if (ftab_type & FTAB_PROVID) account = container_of(setting, struct s_auth, ftab);
-		if (ftab_type & FTAB_CHID)   account = container_of(setting, struct s_auth, fchid);
-		if (account) zName = account->usr;
-	}
-	if (ftab_type & FTAB_READER) {
-		zType = "reader";
-		if (ftab_type & FTAB_PROVID) rdr = container_of(setting, struct s_reader, ftab);
-		if (ftab_type & FTAB_CHID)   rdr = container_of(setting, struct s_reader, fchid);
-		if (rdr) zName = rdr->label;
-	}
-	if (ftab_type & FTAB_PROVID) zFiltNamef = "provid";
-	if (ftab_type & FTAB_CHID)   zFiltNamef = "chid";
-
+static void ident_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_reader *rdr = setting;
 	if (value) {
 		if (strlen(value)) {
-			strtolower(value);
-			chk_ftab(value, ftab, zType, zName, zFiltNamef);
+			chk_ftab(value, &rdr->ftab, "reader", rdr->label, "provid");
 		} else {
-			clear_ftab(ftab);
+			clear_ftab(&rdr->ftab);
 		}
-		if (rdr)
-			rdr->changes_since_shareupdate = 1;
+		rdr->changes_since_shareupdate = 1;
 		return;
 	}
-	value = mk_t_ftab(ftab);
+	value = mk_t_ftab(&rdr->ftab);
+	if (strlen(value) > 0 || cfg.http_full_cfg)
+		fprintf_conf(f, token, "%s\n", value);
+	free_mk_t(value);
+}
+
+static void chid_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_reader *rdr = setting;
+	if (value) {
+		chk_ftab(value, &rdr->fchid, "reader", rdr->label, "chid");
+		rdr->changes_since_shareupdate = 1;
+		return;
+	}
+	value = mk_t_ftab(&rdr->fchid);
+	if (strlen(value) > 0 || cfg.http_full_cfg)
+		fprintf_conf(f, token, "%s\n", value);
+	free_mk_t(value);
+}
+
+static void class_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_reader *rdr = setting;
+	if (value) {
+		chk_cltab(value, &rdr->cltab);
+		return;
+	}
+	value = mk_t_cltab(&rdr->cltab);
 	if (strlen(value) > 0 || cfg.http_full_cfg)
 		fprintf_conf(f, token, "%s\n", value);
 	free_mk_t(value);
@@ -496,6 +693,26 @@ static void aeskeys_fn(const char *token, char *value, void *setting, FILE *f) {
 		return;
 	}
 	value = mk_t_aeskeys(rdr);
+	if (strlen(value) > 0 || cfg.http_full_cfg)
+		fprintf_conf(f, token, "%s\n", value);
+	free_mk_t(value);
+}
+
+static void group_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_reader *rdr = setting;
+	if (value) {
+		char *ptr, *saveptr1 = NULL;
+		rdr->grp = 0;
+		for (ptr = strtok_r(value, ",", &saveptr1); ptr; ptr = strtok_r(NULL, ",", &saveptr1)) {
+			int32_t g;
+			g = atoi(ptr);
+			if (g > 0 && g < 65) {
+				rdr->grp |= (((uint64_t)1)<<(g-1));
+			}
+		}
+		return;
+	}
+	value = mk_t_group(rdr->grp);
 	if (strlen(value) > 0 || cfg.http_full_cfg)
 		fprintf_conf(f, token, "%s\n", value);
 	free_mk_t(value);
@@ -571,6 +788,27 @@ static void nano_fn(const char *token, char *value, void *setting, FILE *f) {
 	if (strlen(value) > 0 || cfg.http_full_cfg)
 		fprintf_conf(f, token, "%s\n", value);
 	free_mk_t(value);
+}
+
+static void boxkey_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_reader *rdr = setting;
+	if (value) {
+		if (strlen(value) != 16) {
+			memset(rdr->nagra_boxkey, 0, 16);
+		} else {
+			if (key_atob_l(value, rdr->nagra_boxkey, 16)) {
+				fprintf(stderr, "Configuration reader: Error in boxkey\n");
+				memset(rdr->nagra_boxkey, 0, sizeof(rdr->nagra_boxkey));
+			}
+		}
+		return;
+	}
+	int32_t len = check_filled(rdr->nagra_boxkey, 8);
+	if (len > 0 || cfg.http_full_cfg) {
+		char tmp[17];
+		fprintf_conf(f, token, "%s\n", len > 0 ?
+			cs_hexdump(0, rdr->nagra_boxkey, 8, tmp, sizeof(tmp)) : "");
+	}
 }
 
 static void auprovid_fn(const char *token, char *value, void *setting, FILE *f) {
@@ -674,7 +912,6 @@ static void cooldowntime_fn(const char *UNUSED(token), char *value, void *settin
 	// It is only set by WebIf as convenience
 }
 
-#ifdef WITH_LB
 static void reader_fixups_fn(void *var) {
 	struct s_reader *rdr = var;
 	if (rdr->lb_weight > 1000)
@@ -682,15 +919,12 @@ static void reader_fixups_fn(void *var) {
 	else if (rdr->lb_weight <= 0)
 		rdr->lb_weight = 100;
 }
-#endif
 
 #define OFS(X) offsetof(struct s_reader, X)
 #define SIZEOF(X) sizeof(((struct s_reader *)0)->X)
 
 static const struct config_list reader_opts[] = {
-#ifdef WITH_LB
 	DEF_OPT_FIXUP_FUNC(reader_fixups_fn),
-#endif
 	DEF_OPT_FUNC("label"				, 0,							reader_label_fn ),
 #ifdef WEBIF
 	DEF_OPT_STR("description"			, OFS(description),				NULL ),
@@ -698,50 +932,42 @@ static const struct config_list reader_opts[] = {
 	DEF_OPT_INT8("enable"				, OFS(enable),					1 ),
 	DEF_OPT_FUNC("protocol"				, 0,							protocol_fn ),
 	DEF_OPT_FUNC("device"				, 0,							device_fn ),
-	DEF_OPT_HEX("key"					, OFS(ncd_key),					SIZEOF(ncd_key) ),
+	DEF_OPT_FUNC("key"					, 0,							key_fn ),
 	DEF_OPT_SSTR("user"					, OFS(r_usr),					"", SIZEOF(r_usr) ),
 	DEF_OPT_SSTR("password"				, OFS(r_pwd),					"", SIZEOF(r_pwd) ),
 	DEF_OPT_SSTR("pincode"				, OFS(pincode),					"none", SIZEOF(pincode) ),
-#ifdef MODULE_GBOX
 	DEF_OPT_FUNC("mg-encrypted"			, 0,							mgencrypted_fn ),
-	DEF_OPT_INT8("gbox_max_distance"	, OFS(gbox_maxdist), 			DEFAULT_GBOX_MAX_DIST ),
-	DEF_OPT_INT8("gbox_max_ecm_send"	, OFS(gbox_maxecmsend), 		DEFAULT_GBOX_MAX_ECM_SEND ),
-	DEF_OPT_INT8("gbox_reshare"			, OFS(gbox_reshare), 			0 ),
-	DEF_OPT_FUNC("gbox_group"			, OFS(gbox_grp), 				group_fn ),
-	DEF_OPT_SSTR("gbox_my_password"		, OFS(gbox_my_password),		"",	SIZEOF(gbox_my_password) ),
-#endif
 	DEF_OPT_STR("readnano"				, OFS(emmfile),					NULL ),
-	DEF_OPT_FUNC("services"				, OFS(sidtabs),					reader_services_fn ),
+	DEF_OPT_FUNC("services"				, 0,							services_fn ),
 	DEF_OPT_INT32("inactivitytimeout"	, OFS(tcp_ito),					DEFAULT_INACTIVITYTIMEOUT ),
 	DEF_OPT_INT32("reconnecttimeout"	, OFS(tcp_rto),					DEFAULT_TCP_RECONNECT_TIMEOUT ),
 	DEF_OPT_INT32("resetcycle"			, OFS(resetcycle),				0 ),
 	DEF_OPT_INT32("resetcycle_nok"			, OFS(resetcycle_nok),				0 ),
 	DEF_OPT_INT8("disableserverfilter"	, OFS(ncd_disable_server_filt),	0 ),
-	DEF_OPT_INT8("connectoninit"		, OFS(ncd_connect_on_init),		0 ),
 	DEF_OPT_INT8("smargopatch"			, OFS(smargopatch),				0 ),
 	DEF_OPT_UINT8("sc8in1_dtrrts_patch"	, OFS(sc8in1_dtrrts_patch),		0 ),
 	DEF_OPT_INT8("fallback"				, OFS(fallback),				0 ),
 #ifdef CS_CACHEEX
 	DEF_OPT_INT8("cacheex"				, OFS(cacheex.mode),			0 ),
 	DEF_OPT_INT8("cacheex_maxhop"		, OFS(cacheex.maxhop),			0 ),
-	DEF_OPT_FUNC("cacheex_ecm_filter"		, OFS(cacheex.filter_caidtab),	cacheex_hitvaluetab_fn ),
+	DEF_OPT_FUNC("cacheex_ecm_filter"	, 0,							cacheex_ecm_filter_fn ),
 	DEF_OPT_UINT8("cacheex_allow_request"	, OFS(cacheex.allow_request),	1 ),
 	DEF_OPT_UINT8("cacheex_drop_csp"		, OFS(cacheex.drop_csp),		0 ),
 #endif
 #ifdef WITH_COOLAPI
-	DEF_OPT_INT32("cool_timeout_init"			, OFS(cool_timeout_init),			0 ), //0 = use value from atr
-	DEF_OPT_INT32("cool_timeout_after_init"		, OFS(cool_timeout_after_init),		0 ), //0 = use value from atr
+	DEF_OPT_INT32("cool_timeout_init"			, OFS(cool_timeout_init),			50 ),
+	DEF_OPT_INT32("cool_timeout_after_init"		, OFS(cool_timeout_after_init),		150 ),
 #endif
-	DEF_OPT_FUNC("caid"					, OFS(ctab),					reader_caid_fn ),
+	DEF_OPT_INT32("logport"				, OFS(log_port),				0 ),
+	DEF_OPT_FUNC("caid"					, 0,							caid_fn ),
 	DEF_OPT_FUNC("atr"					, 0,							atr_fn ),
 	DEF_OPT_FUNC("boxid"				, 0,							boxid_fn ),
-	DEF_OPT_HEX("boxkey"				, OFS(boxkey),					SIZEOF(boxkey) ),
+	DEF_OPT_FUNC("boxkey"				, 0,							boxkey_fn ),
 	DEF_OPT_FUNC("rsakey"				, 0,							rsakey_fn ),
 	DEF_OPT_FUNC_X("ins7e"				, OFS(ins7E),					ins7E_fn, SIZEOF(ins7E) ),
 	DEF_OPT_FUNC_X("ins7e11"			, OFS(ins7E11),					ins7E_fn, SIZEOF(ins7E11) ),
 	DEF_OPT_INT8("fix9993"				, OFS(fix_9993),				0 ),
 	DEF_OPT_INT8("force_irdeto"			, OFS(force_irdeto),			0 ),
-	DEF_OPT_UINT32("ecmnotfoundlimit"	, OFS(ecmnotfoundlimit),		0 ),
 	DEF_OPT_FUNC("ecmwhitelist"			, 0,							ecmwhitelist_fn ),
 	DEF_OPT_FUNC("ecmheaderwhitelist"	, 0,							ecmheaderwhitelist_fn ),
 	DEF_OPT_FUNC("detect"				, 0,							detect_fn ),
@@ -751,11 +977,11 @@ static const struct config_list reader_opts[] = {
 #ifdef WITH_AZBOX
 	DEF_OPT_INT32("mode"				, OFS(azbox_mode),				-1 ),
 #endif
-	DEF_OPT_FUNC_X("ident"				, OFS(ftab),					ftab_fn, FTAB_READER | FTAB_PROVID ),
-	DEF_OPT_FUNC_X("chid"				, OFS(fchid),					ftab_fn, FTAB_READER | FTAB_CHID ),
-	DEF_OPT_FUNC("class"				, OFS(cltab),					class_fn ),
+	DEF_OPT_FUNC("ident"				, 0,							ident_fn ),
+	DEF_OPT_FUNC("chid"					, 0,							chid_fn ),
+	DEF_OPT_FUNC("class"				, 0,							class_fn ),
 	DEF_OPT_FUNC("aeskeys"				, 0,							aeskeys_fn ),
-	DEF_OPT_FUNC("group"				, OFS(grp),						group_fn ),
+	DEF_OPT_FUNC("group"				, 0,							group_fn ),
 	DEF_OPT_FUNC("emmcache"				, 0,							emmcache_fn ),
 	DEF_OPT_FUNC_X("blockemm-unknown"	, OFS(blockemm),				flags_fn, EMM_UNKNOWN ),
 	DEF_OPT_FUNC_X("blockemm-u"			, OFS(blockemm),				flags_fn, EMM_UNIQUE ),
@@ -787,15 +1013,12 @@ static const struct config_list reader_opts[] = {
 	DEF_OPT_INT32("cccreconnect"		, OFS(cc_reconnect),			DEFAULT_CC_RECONNECT ),
 	DEF_OPT_INT8("ccchop"				, OFS(cc_hop),					0 ),
 #endif
-	DEF_OPT_UINT8("emmreassembly"		, OFS(emm_reassembly), 			1 ),
 	DEF_OPT_INT8("deprecated"			, OFS(deprecated),				0 ),
 	DEF_OPT_INT8("audisabled"			, OFS(audisabled),				0 ),
 	DEF_OPT_FUNC("auprovid"				, 0,							auprovid_fn ),
 	DEF_OPT_INT8("ndsversion"			, OFS(ndsversion),				0 ),
 	DEF_OPT_FUNC("ratelimitecm"			, 0,							ratelimitecm_fn ),
 	DEF_OPT_FUNC("ratelimitseconds"		, 0,							ratelimitseconds_fn ),
-	DEF_OPT_INT8("ecmunique"			, OFS(ecmunique),				0 ),
-	DEF_OPT_INT8("srvidholdseconds"		, OFS(srvidholdseconds),		0 ),
 	DEF_OPT_FUNC("cooldown"				, 0,							cooldown_fn ),
 	DEF_OPT_FUNC("cooldowndelay"		, 0,							cooldowndelay_fn ),
 	DEF_OPT_FUNC("cooldowntime"			, 0,							cooldowntime_fn ),
@@ -819,12 +1042,12 @@ static bool reader_check_setting(const struct config_list *UNUSED(clist), void *
 	static const char *hw_only_settings[] = {
 		"readnano", "resetcycle", "smargopatch", "sc8in1_dtrrts_patch", "boxid",
 		"fix9993", "rsakey", "ins7e", "ins7e11", "force_irdeto", "boxkey",
-		"atr", "detect", "nagra_read", "mhz", "cardmhz", "emmreassembly",
+		"atr", "detect", "nagra_read", "mhz", "cardmhz",
 #ifdef WITH_AZBOX
 		"mode",
 #endif
 		"deprecated", "ndsversion", "ratelimitecm", "ratelimitseconds",
-		"cooldown", "ecmunique", "srvidholdseconds",
+		"cooldown",
 		0
 	};
 	// These are written only when the reader is network reader
@@ -849,18 +1072,14 @@ static bool reader_check_setting(const struct config_list *UNUSED(clist), void *
 		return false;
 
 	// Special settings for NEWCAMD
-	static const char *newcamd_settings[] = {
-		"disableserverfilter", "connectoninit",
-		0
-	};
-	if (reader->typ != R_NEWCAMD && in_list(setting, newcamd_settings))
+	if (reader->typ != R_NEWCAMD && streq(setting, "disableserverfilter"))
 		return false;
 
 #ifdef MODULE_CCCAM
 	// These are written only when the reader is CCCAM
 	static const char *cccam_settings[] = {
 		"cccversion", "cccmaxhops", "cccmindown", "cccwantemu", "ccckeepalive",
-		"cccreconnect",
+		"cccreshare", "cccreconnect",
 		0
 	};
 	// Special settings for CCCAM
@@ -970,7 +1189,15 @@ int32_t init_readerdb(void)
 	struct s_reader *rdr;
 	LL_ITER itr = ll_iter_create(configured_readers);
 	while((rdr = ll_iter_next(&itr))) { //build active readers list
-		module_reader_set(rdr);
+		int32_t i;
+		if (is_cascading_reader(rdr)) {
+			for (i=0; i<CS_MAX_MOD; i++) {
+				if (modules[i].num && rdr->typ==modules[i].num) {
+					rdr->ph=modules[i];
+					if(rdr->device[0]) rdr->ph.active=1;
+				}
+			}
+		}
 		cs_debug_mask(D_READER,"[debug reader] device=%s port=%d enable=%d group=%llu",rdr->device,rdr->r_port,rdr->enable,rdr->grp);
 	}
 	return(0);
@@ -1012,26 +1239,7 @@ void free_reader(struct s_reader *rdr)
 	}
 
 #endif
-	cs_clear_entitlement(rdr);
-	if (rdr->ll_entitlements) {
-		ll_destroy(rdr->ll_entitlements);
-		rdr->ll_entitlements = NULL;
-	}
-	NULLFREE(rdr->csystem_data);
 	add_garbage(rdr);
-}
-
-int32_t free_readerdb(void) {
-	int count = 0;
-	struct s_reader *rdr;
-	LL_ITER itr = ll_iter_create(configured_readers);
-	while((rdr = ll_iter_next(&itr))) {
-		free_reader(rdr);
-		count++;
-	}
-	cs_log("readerdb %d readers freed", count);
-	ll_destroy(configured_readers);
-	return count;
 }
 
 int32_t write_server(void)

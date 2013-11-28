@@ -2,16 +2,12 @@
 
 #ifdef MODULE_CCCAM
 
-#include "cscrypt/md5.h"
-#include "cscrypt/sha1.h"
 #include "module-cacheex.h"
 #include "module-cccam.h"
 #include "module-cccam-data.h"
 #include "module-cccshare.h"
 #include "oscam-chk.h"
 #include "oscam-client.h"
-#include "oscam-ecm.h"
-#include "oscam-emm.h"
 #include "oscam-failban.h"
 #include "oscam-garbage.h"
 #include "oscam-lock.h"
@@ -19,14 +15,13 @@
 #include "oscam-reader.h"
 #include "oscam-string.h"
 #include "oscam-time.h"
-#include "oscam-work.h"
 
 //Mode names for CMD_05 command:
-static const char *cmd05_mode_name[] = { "UNKNOWN", "PLAIN", "AES", "CC_CRYPT", "RC4",
+const char *cmd05_mode_name[] = { "UNKNOWN", "PLAIN", "AES", "CC_CRYPT", "RC4",
 		"LEN=0" };
 
 //Mode names for CMD_0C command:
-static const char *cmd0c_mode_name[] = { "NONE", "RC6", "RC4", "CC_CRYPT", "AES", "IDEA" };
+const char *cmd0c_mode_name[] = { "NONE", "RC6", "RC4", "CC_CRYPT", "AES", "IDEA" };
 
 const char *cc_msg_name[]={"MSG_CLI_DATA","MSG_CW_ECM","MSG_EMM_ACK","MSG_VALUE_03",
 			    "MSG_CARD_REMOVED","MSG_CMD_05","MSG_KEEPALIVE","MSG_NEW_CARD",
@@ -609,6 +604,10 @@ int32_t cc_cmd_send(struct s_client *cl, uint8_t *buf, int32_t len, cc_msg_type_
 
 	struct s_reader *rdr = (cl->typ == 'c') ? NULL : cl->reader;
 
+	uint8_t *netbuf;
+	if (!cs_malloc(&netbuf, len + 4))
+		return -1;
+
 	int32_t n;
 	struct cc_data *cc = cl->cc;
 
@@ -618,10 +617,6 @@ int32_t cc_cmd_send(struct s_client *cl, uint8_t *buf, int32_t len, cc_msg_type_
 		cs_writeunlock(&cc->lockcmd);
 		return -1;
 	}
-
-	uint8_t *netbuf;
-	if (!cs_malloc(&netbuf, len + 4))
-		return -1;
 
   if (cmd == MSG_NO_HEADER) {
 		memcpy(netbuf, buf, len);
@@ -662,9 +657,9 @@ int32_t cc_cmd_send(struct s_client *cl, uint8_t *buf, int32_t len, cc_msg_type_
 
 #define CC_DEFAULT_VERSION 1
 #define CC_VERSIONS 8
-static char *version[CC_VERSIONS]  = { "2.0.11", "2.1.1", "2.1.2", "2.1.3", "2.1.4", "2.2.0", "2.2.1", "2.3.0"};
-static char *build[CC_VERSIONS]    = { "2892",   "2971",  "3094",  "3165",  "3191",  "3290",  "3316",  "3367"};
-static char extcompat[CC_VERSIONS] = { 0,        0,       0,       0,       0,       1,       1,       1}; //Supporting new card format starting with 2.2.0
+char *version[CC_VERSIONS]  = { "2.0.11", "2.1.1", "2.1.2", "2.1.3", "2.1.4", "2.2.0", "2.2.1", "2.3.0"};
+char *build[CC_VERSIONS]    = { "2892",   "2971",  "3094",  "3165",  "3191",  "3290",  "3316",  "3367"};
+char extcompat[CC_VERSIONS] = { 0,        0,       0,       0,       0,       1,       1,       1}; //Supporting new card format starting with 2.2.0
 
 /**
  * reader+server
@@ -1258,6 +1253,7 @@ int32_t cc_send_ecm(struct s_client *cl, ECM_REQUEST *er, uchar *buf) {
 
 	//No Card? Waiting for shares
 	if (!ll_has_elements(cc->cards)) {
+		rdr->fd_error++;
 		cs_debug_mask(D_READER, "%s NO CARDS!", getprefix());
 		return 0;
 	}
@@ -1396,7 +1392,7 @@ int32_t cc_send_ecm(struct s_client *cl, ECM_REQUEST *er, uchar *buf) {
 			}
 			eei->tps = cur_er->tps;
 
-			rdr->currenthops = card->hop;
+			rdr->cc_currenthops = card->hop;
 			rdr->card_status = CARD_INSERTED;
 
 			cs_debug_mask(
@@ -2240,7 +2236,7 @@ int32_t cc_parse_msg(struct s_client *cl, uint8_t *buf, int32_t l) {
 			if (cc->is_oscam_cccam) {
 				uint8_t token[256];
 				snprintf((char *)token, sizeof(token),
-						"PARTNER: OSCam v%s, build r%s (%s) [EXT,SID,SLP]", CS_VERSION,
+						"PARTNER: OSCam v%s, build #%s (%s) [EXT,SID,SLP]", CS_VERSION,
 						CS_SVN_VERSION, CS_TARGET);
 				cc_cmd_send(cl, token, strlen((char *)token) + 1, MSG_CW_NOK1);
 			}
@@ -2456,7 +2452,7 @@ int32_t cc_parse_msg(struct s_client *cl, uint8_t *buf, int32_t l) {
 
 					uchar token[256];
 					snprintf((char *)token, sizeof(token),
-						"PARTNER: OSCam v%s, build r%s (%s)%s",
+						"PARTNER: OSCam v%s, build #%s (%s)%s",
 						CS_VERSION, CS_SVN_VERSION, CS_TARGET, param);
 					cc_cmd_send(cl, token, strlen((char *)token) + 1, MSG_CW_NOK1);
 				}
@@ -2597,16 +2593,18 @@ int32_t cc_parse_msg(struct s_client *cl, uint8_t *buf, int32_t l) {
 			struct cc_card *server_card;
 			if (!cs_malloc(&server_card, sizeof(struct cc_card)))
 				break;
+			memset(server_card, 0, sizeof(struct cc_card));
 			server_card->id = buf[10] << 24 | buf[11] << 16 | buf[12] << 8
 					| buf[13];
 			server_card->caid = b2i(2, data);
-#define CCMSG_HEADER_LEN 17
-			if ((er = get_ecmtask()) && l > CCMSG_HEADER_LEN && MAX_ECM_SIZE > l - CCMSG_HEADER_LEN) {
+
+			if ((er = get_ecmtask())) {
 				er->caid = b2i(2, buf + 4);
-				er->prid = b2i(4, buf + 6);
 				er->srvid = b2i(2, buf + 14);
-				er->ecmlen = l - CCMSG_HEADER_LEN;
-				memcpy(er->ecm, buf + CCMSG_HEADER_LEN, er->ecmlen);
+				//er->ecmlen =(((buf[18]&0x0f)<< 8) | buf[19])+3;
+				er->ecmlen = l-17;
+				memcpy(er->ecm, buf + 17, er->ecmlen);
+				er->prid = b2i(4, buf + 6);
 				cc->server_ecm_pending++;
 				er->idx = ++cc->server_ecm_idx;
 
@@ -2682,7 +2680,7 @@ int32_t cc_parse_msg(struct s_client *cl, uint8_t *buf, int32_t l) {
 				get_cw(cl, er);
 
 			} else {
-				cs_debug_mask(D_CLIENT, "%s NO ECMTASK!!!! l=%d", getprefix(), l);
+				cs_debug_mask(D_CLIENT, "%s NO ECMTASK!!!!", getprefix());
 				free(server_card);
 			}
 
@@ -2966,6 +2964,7 @@ int32_t cc_parse_msg(struct s_client *cl, uint8_t *buf, int32_t l) {
 				EMM_PACKET *emm;
 				if (!cs_malloc(&emm, sizeof(EMM_PACKET)))
 					break;
+				memset(emm, 0, sizeof(EMM_PACKET));
 				emm->caid[0] = buf[4];
 				emm->caid[1] = buf[5];
 				emm->provid[0] = buf[7];
@@ -3138,9 +3137,6 @@ int32_t cc_recv(struct s_client *cl, uchar *buf, int32_t l) {
 	} else if (n < 4) {
 		cs_log("%s packet is too small (%d bytes)", getprefix(), n);
 		n = -1;
-	} else if (n > CC_MAXMSGSIZE) {
-		cs_log("%s packet is too big (%d bytes, max: %d)", getprefix(), n, CC_MAXMSGSIZE);
-		n = -1;
 	} else {
 		// parse it and write it back, if we have received something of value
 		n = cc_parse_msg(cl, buf, n);
@@ -3208,6 +3204,7 @@ int32_t cc_srv_connect(struct s_client *cl) {
 
 	// init internals data struct
 	cl->cc = cc;
+	memset(cl->cc, 0, sizeof(struct cc_data));
 	cc->extended_ecm_idx = ll_create("extended_ecm_idx");
 
 	cc_init_locks(cc);
@@ -3590,6 +3587,7 @@ int32_t cc_cli_connect(struct s_client *cl) {
 	rdr->caid = rdr->ftab.filts[0].caid;
 	rdr->nprov = rdr->ftab.filts[0].nprids;
 	for (n = 0; n < rdr->nprov; n++) {
+		rdr->availkeys[n][0] = 1;
 		rdr->prid[n][0] = rdr->ftab.filts[0].prids[n] >> 24;
 		rdr->prid[n][1] = rdr->ftab.filts[0].prids[n] >> 16;
 		rdr->prid[n][2] = rdr->ftab.filts[0].prids[n] >> 8;
@@ -3723,10 +3721,6 @@ void cc_cleanup(struct s_client *cl) {
 
 void cc_update_nodeid(void)
 {
-	if (check_filled(cfg.cc_fixed_nodeid, sizeof(cfg.cc_fixed_nodeid))) {
-		memcpy(cc_node_id, cfg.cc_fixed_nodeid, 8);
-		return;
-	}
 	//Partner Detection:
 	uint16_t sum = 0x1234; //This is our checksum
 	int32_t i;
@@ -3749,7 +3743,16 @@ void cc_update_nodeid(void)
 	cc_node_id[6] = sum >> 8;
 	cc_node_id[7] = sum & 0xff;
 
-	memcpy(cfg.cc_fixed_nodeid, cc_node_id, 8);
+	int8_t valid = 0;
+	if (cfg.cc_use_fixed_nodeid) {
+		for (i=0;i<8;i++)
+			if (cfg.cc_fixed_nodeid[i])
+				valid = 1;
+	}
+	if (valid)
+		memcpy(cc_node_id, cfg.cc_fixed_nodeid, 8);
+	else
+		memcpy(cfg.cc_fixed_nodeid, cc_node_id, 8);
 }
 
 bool cccam_forward_origin_card(ECM_REQUEST *er) {
@@ -3807,8 +3810,11 @@ void module_cccam(struct s_module *ph) {
 	ph->large_ecm_support = 1;
 	ph->listenertype = LIS_CCCAM;
 	ph->num = R_CCCAM;
+	ph->logtxt = ", crypted";
 	ph->recv = cc_recv;
 	ph->cleanup = cc_cleanup;
+	ph->multi = 1;
+	ph->c_multi = 1;
 	ph->bufsize = 2048;
 	ph->c_init = cc_cli_init;
 	ph->c_idle = cc_idle;
@@ -3832,12 +3838,16 @@ void module_cccam(struct s_module *ph) {
 	cc_update_nodeid();
 
 #ifdef MODULE_CCCSHARE
+	static PTAB ptab; //since there is always only 1 cccam server running, this is threadsafe
+	memset(&ptab, 0, sizeof(PTAB));
 	int32_t i;
 	for (i=0;i<CS_MAXPORTS;i++) {
 		if (!cfg.cc_port[i]) break;
-		ph->ptab.ports[i].s_port = cfg.cc_port[i];
-		ph->ptab.nports++;
+		ptab.ports[i].s_port = cfg.cc_port[i];
+		ptab.nports++;
 	}
+
+	ph->ptab = &ptab;
 
 	if (cfg.cc_port[0])
 		cccam_init_share();

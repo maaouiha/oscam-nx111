@@ -2,11 +2,10 @@
 #include "globals.h"
 #ifdef MODULE_CONSTCW
 #include "oscam-client.h"
-#include "oscam-ecm.h"
 #include "oscam-net.h"
 #include "oscam-string.h"
 
-static int32_t pserver;
+int32_t pserver = 0;
 
 int32_t constcw_file_available(void)
 {
@@ -135,8 +134,10 @@ void module_constcw(struct s_module *ph)
   ph->desc = "constcw";
   ph->type = MOD_NO_CONN;
   ph->listenertype = LIS_CONSTCW;
+  ph->multi = 0;
   ph->recv = constcw_recv;
 
+  ph->c_multi = 1;
   ph->c_init = constcw_client_init;
   ph->c_recv_chk = constcw_recv_chk;
   ph->c_send_ecm = constcw_send_ecm;

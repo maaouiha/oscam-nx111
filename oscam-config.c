@@ -4,14 +4,11 @@
 
 #include "oscam-conf.h"
 #include "oscam-conf-chk.h"
-#include "oscam-config.h"
 #include "oscam-files.h"
 #include "oscam-garbage.h"
 #include "oscam-lock.h"
 #include "oscam-string.h"
 #include "oscam-time.h"
-
-extern uint16_t len4caid[256];
 
 #define cs_srid				"oscam.srvid"
 #define cs_trid				"oscam.tiers"
@@ -23,14 +20,6 @@ extern uint16_t len4caid[256];
 extern  uint8_t cs_http_use_utf8;
 
 uint32_t cfg_sidtab_generation = 1;
-
-extern char cs_confdir[];
-
-char *get_config_filename(char *dest, size_t destlen, const char *filename) {
-	// cs_confdir is always terminated with /
-	snprintf(dest, destlen, "%s%s", cs_confdir, filename);
-	return dest;
-}
 
 int32_t write_services(void)
 {
@@ -301,6 +290,9 @@ int32_t init_provid(void) {
 	fclose(fp);
 	if (nr>0)
 		cs_log("%d provid's loaded", nr);
+	else{
+		cs_log("oscam.provid loading failed, wrong format?");
+	}
 	return(0);
 }
 
@@ -444,6 +436,8 @@ int32_t init_srvid(void)
 			cs_log("WARNING: You risk high CPU load and high ECM times with more than 2000 service-id's!");
 			cs_log("HINT: --> use optimized lists from http://www.streamboard.tv/wiki/Srvid");
 		}
+	} else {
+		cs_log("oscam.srvid loading failed, old format");
 	}
 
 	cs_writelock(&config_lock);
@@ -451,21 +445,20 @@ int32_t init_srvid(void)
 	memcpy(last_srvid, cfg.srvid, sizeof(last_srvid));	//old data
 	memcpy(cfg.srvid, new_cfg_srvid, sizeof(last_srvid));	//assign after loading, so everything is in memory
 
-	cs_writeunlock(&config_lock);
-	
 	struct s_client *cl;
 	for (cl=first_client->next; cl ; cl=cl->next)
 		cl->last_srvidptr=NULL;
 
 	struct s_srvid *ptr;
 	for (i=0; i<16; i++) {
-		ptr = last_srvid[i];
-		while (ptr) { //cleanup old data:			
-			add_garbage(ptr->data);
-			add_garbage(ptr);
-			ptr = ptr->next;
+		while (last_srvid[i]) { //cleanup old data:
+			ptr = last_srvid[i]->next;
+			free(last_srvid[i]->data);
+			free(last_srvid[i]);
+			last_srvid[i] = ptr;
 		}
 	}
+	cs_writeunlock(&config_lock);
 
 	return(0);
 }
@@ -529,6 +522,9 @@ int32_t init_tierid(void)
 	fclose(fp);
 	if (nr>0)
 		cs_log("%d tier-id's loaded", nr);
+	else{
+		cs_log("%s loading failed", cs_trid);
+	}
 	cs_writelock(&config_lock);
 	//reload function:
 	tierid = cfg.tierid;
@@ -729,8 +725,7 @@ static struct s_global_whitelist *global_whitelist_read_int(void) {
 			}
 	}
 
-	if (count)
-		cs_log("%d entries read from %s", count, cs_whitelist);
+	cs_log("%d entries read from %s", count, cs_whitelist);
 
 	fclose(fp);
 
@@ -785,8 +780,7 @@ void init_len4caid(void)
 	}
 	free(token);
 	fclose(fp);
-	if (nr)
-		cs_log("%d lengths for caid guessing loaded", nr);
+	cs_log("%d lengths for caid guessing loaded", nr);
 	return;
 }
 
@@ -855,7 +849,7 @@ int32_t chk_cccam_cfg_F_more(char *line,struct s_auth * account)
 
 							}
 							if(sp){
-								account->sidtabs.ok |= (1<<sppos);
+								account->sidtabok |= (1<<sppos);
 								continue;
 							}
 
@@ -875,7 +869,7 @@ int32_t chk_cccam_cfg_F_more(char *line,struct s_auth * account)
 						    	chk_sidtab("caid",scaid, sp);
 						    	chk_sidtab("provid",sprovid,sp);
 						    	chk_sidtab("caid",ssrvid, sp);
-							account->sidtabs.ok |= (1<<sppos);
+							account->sidtabok |= (1<<sppos);
 						}
 					}
 					dno++;

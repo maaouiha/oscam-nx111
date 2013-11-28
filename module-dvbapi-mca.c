@@ -23,11 +23,9 @@
 //#include "extapi/openxcas/openxcas_api.h"
 //#include "extapi/openxcas/openxcas_message.h"
 
-#define DVBAPI_LOG_PREFIX 1
 #include "module-dvbapi.h"
 #include "module-dvbapi-mca.h"
 #include "oscam-client.h"
-#include "oscam-ecm.h"
 #include "oscam-reader.h"
 #include "oscam-string.h"
 #include "oscam-time.h"
@@ -244,6 +242,24 @@ void mca_ecm_callback(int32_t stream_id, uint32_t UNUSED(seq), int32_t cipher_in
 	struct timeb tp;
 	cs_ftime(&tp);
 	tp.time+=500;
+
+/*
+	while(1) {
+		chk_pending(tp);
+
+		if (poll(&pfd, 1, 10) < 0)
+			continue;
+
+		if (pfd.revents & (POLLHUP | POLLNVAL)) {
+			cs_debug_mask(D_DVBAPI, LOG_PREFIX "ecm/cw error");
+			break;
+		}
+
+		if (pfd.revents & (POLLIN | POLLPRI)) {
+			chk_dcw(cur_client()->fd_m2c_c);
+			break;
+		}
+	}*/
 }
 
 
@@ -429,7 +445,9 @@ void mca_send_dcw(struct s_client *client, ECM_REQUEST *er) {
 			else
 				fprintf(ecmtxt, "from: local\n");
 			fprintf(ecmtxt, "protocol: %s\n", reader_get_type_desc(er->selected_reader, 1));
-			fprintf(ecmtxt, "hops: %d\n", er->selected_reader->currenthops);
+#ifdef MODULE_CCCAM
+			fprintf(ecmtxt, "hops: %d\n", er->selected_reader->cc_currenthops);
+#endif
 			fprintf(ecmtxt, "ecm time: %.3f\n", (float) client->cwlastresptime/1000);
 			fprintf(ecmtxt, "cw0: %s\n", cs_hexdump(1,demux[0].lastcw[0],8, tmp, sizeof(tmp)));
 			fprintf(ecmtxt, "cw1: %s\n", cs_hexdump(1,demux[0].lastcw[1],8, tmp, sizeof(tmp)));

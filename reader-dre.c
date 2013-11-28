@@ -1,11 +1,6 @@
 #include "globals.h"
 #ifdef READER_DRE
-#include "cscrypt/des.h"
 #include "reader-common.h"
-
-struct dre_data {
-	uint8_t		provider;
-};
 
 #define OK_RESPONSE 0x61
 #define CMD_BYTE 0x59
@@ -101,11 +96,10 @@ static int32_t dre_set_provider_info (struct s_reader * reader)
   int32_t i;
   uchar cmd59[] = { 0x59, 0x14 };	// subscriptions
   uchar cmd5b[] = { 0x5b, 0x00, 0x14 };	//validity dates
-  struct dre_data *csystem_data = reader->csystem_data;
 
   cs_clear_entitlement(reader);
 
-  cmd59[1] = csystem_data->provider;
+  cmd59[1] = reader->provider;
   if ((dre_cmd (cmd59))) {	//ask subscription packages, returns error on 0x11 card
     uchar pbm[32];
     char tmp_dbg[65];
@@ -118,7 +112,7 @@ static int32_t dre_set_provider_info (struct s_reader * reader)
       for (i = 0; i < 32; i++)
 	if (pbm[i] != 0xff) {
 	  cmd5b[1] = i;
-	  cmd5b[2] = csystem_data->provider;
+	  cmd5b[2] = reader->provider;
 	  dre_cmd (cmd5b);	//ask for validity dates
 
 	  time_t start;
@@ -160,11 +154,7 @@ static int32_t dre_card_init (struct s_reader * reader, ATR *newatr)
 	))
     return ERROR;
 
-  if (!cs_malloc(&reader->csystem_data, sizeof(struct dre_data)))
-    return ERROR;
-  struct dre_data *csystem_data = reader->csystem_data;
-
-  csystem_data->provider = atr[6];
+  reader->provider = atr[6];
   uchar checksum = xor (atr + 1, 6);
 
   if (checksum != atr[7])
@@ -206,12 +196,12 @@ response:
 FE 48 */
 
   uchar cmd54[] = { 0x54, 0x14 };	// geocode
-  cmd54[1] = csystem_data->provider;
+  cmd54[1] = reader->provider;
   uchar geocode = 0;
   if ((dre_cmd (cmd54)))	//error would not be fatal, like on 0x11 cards
     geocode = cta_res[3];
 
-  providers[1] = csystem_data->provider;
+  providers[1] = reader->provider;
   if (!(dre_cmd (providers)))
     return ERROR;			//fatal error
   if ((cta_res[cta_lr - 2] != 0x90) || (cta_res[cta_lr - 1] != 0x00))
@@ -225,7 +215,7 @@ FE 48 */
   int32_t major_version = cta_res[3];
   int32_t minor_version = cta_res[4];
 
-  ua[1] = csystem_data->provider;
+  ua[1] = reader->provider;
   dre_cmd (ua);			//error would not be fatal
 
   int32_t hexlength = cta_res[1] - 2;	//discard first and last byte, last byte is always checksum, first is answer code
@@ -237,7 +227,7 @@ FE 48 */
   int32_t low_dre_id = ((cta_res[4] << 16) | (cta_res[5] << 8) | cta_res[6]) - 48608;
   int32_t dre_chksum = 0;
   uchar buf[32];
-  snprintf ((char *)buf, sizeof(buf), "%i%i%08i", csystem_data->provider - 16, major_version + 1, low_dre_id);
+  snprintf ((char *)buf, sizeof(buf), "%i%i%08i", reader->provider - 16, major_version + 1, low_dre_id);
   for (i = 0; i < 32; i++) {
     if (buf[i] == 0x00)
       break;
@@ -245,7 +235,7 @@ FE 48 */
   }
 
   rdr_log (reader, "type: DRE Crypt, caid: %04X, serial: {%s}, dre id: %i%i%i%08i, geocode %i, card: %s v%i.%i",
-	  reader->caid, cs_hexdump(0, reader->hexserial + 2, 4, tmp, sizeof(tmp)), dre_chksum, csystem_data->provider - 16,
+	  reader->caid, cs_hexdump(0, reader->hexserial + 2, 4, tmp, sizeof(tmp)), dre_chksum, reader->provider - 16,
 	  major_version + 1, low_dre_id, geocode, card, major_version, minor_version);
   rdr_log (reader, "Provider name:%s.", provname);
 
@@ -303,7 +293,6 @@ static int32_t dre_do_ecm(struct s_reader * reader, const ECM_REQUEST *er, struc
 {
   def_resp;
   char tmp_dbg[256];
-  struct dre_data *csystem_data = reader->csystem_data;
   if (reader->caid == 0x4ae0) {
     uchar ecmcmd41[] = { 0x41,
       0x58, 0x1f, 0x00,		//fixed part, dont change
@@ -311,7 +300,7 @@ static int32_t dre_do_ecm(struct s_reader * reader, const ECM_REQUEST *er, struc
       0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,	//0x11 - 0x18: current key
       0x3b, 0x59, 0x11		//0x3b = keynumber, can be a value 56 ;; 0x59 number of package = 58+1 - Pay Package ;; 0x11 = provider
     };
-    ecmcmd41[22] = csystem_data->provider;
+    ecmcmd41[22] = reader->provider;
     memcpy (ecmcmd41 + 4, er->ecm + 8, 16);
     ecmcmd41[20] = er->ecm[6];	//keynumber
     ecmcmd41[21] = 0x58 + er->ecm[25];	//package number
@@ -338,7 +327,7 @@ static int32_t dre_do_ecm(struct s_reader * reader, const ECM_REQUEST *er, struc
     memcpy (ecmcmd51 + 1, er->ecm + 5, 0x21);
     rdr_debug_mask(reader, D_READER, "unused ECM info front:%s", cs_hexdump(0, er->ecm, 5, tmp_dbg, sizeof(tmp_dbg)));
     rdr_debug_mask(reader, D_READER, "unused ECM info back:%s", cs_hexdump(0, er->ecm + 37, 4, tmp_dbg, sizeof(tmp_dbg)));
-    ecmcmd51[33] = csystem_data->provider;	//no part of sig
+    ecmcmd51[33] = reader->provider;	//no part of sig
     if ((dre_cmd (ecmcmd51))) {	//ecm request
       if ((cta_res[cta_lr - 2] != 0x90) || (cta_res[cta_lr - 1] != 0x00))
 				return ERROR;		//exit if response is not 90 00
@@ -358,7 +347,6 @@ static int32_t dre_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr)
 			ep->type = UNIQUE;
 			return 1; //FIXME: no filling of ep->hexserial
 
-		case 0x83:
 		case 0x89:
 			ep->type = SHARED;
 			// FIXME: Seems to be that SA is only used with caid 0x4ae1
@@ -369,16 +357,6 @@ static int32_t dre_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr)
 			}
 			else
 				return 1;
-
-		case 0x80:
-		case 0x82:
-		case 0x86:
-		case 0x8c:
-			ep->type = SHARED;
-			memset(ep->hexserial, 0, 8);
-			ep->hexserial[0] = ep->emm[3];
-			return ep->hexserial[0] == rdr->sa[0][0];
-
 		default:
 			ep->type = UNKNOWN;
 			return 1;
@@ -392,52 +370,11 @@ void dre_get_emm_filter(struct s_reader * rdr, uchar *filter)
 	filter[0]=0xFF;
 	filter[1]=0;
 
-	filter[idx++]=EMM_SHARED;
-	filter[idx++]=0;
-	filter[idx+0]    = 0x80;
-	filter[idx+1]    = rdr->sa[0][0];
-	filter[idx+0+16] = 0xF2;
-	filter[idx+1+16] = 0xFF;
-	filter[1]++;
-	idx += 32;
-
-	filter[idx++]=EMM_SHARED;
-	filter[idx++]=0;
-	filter[idx+0]    = 0x82;
-	filter[idx+1]    = rdr->sa[0][0];
-	filter[idx+0+16] = 0xF3;
-	filter[idx+1+16] = 0xFF;
-	filter[1]++;
-	idx += 32;
-
-	filter[idx++]=EMM_SHARED;
-	filter[idx++]=0;
-	filter[idx+0]    = 0x83;
-	filter[idx+1]    = rdr->sa[0][0];
-	filter[idx+0+16] = 0xF3;
-	if (rdr->caid == 0x4ae1) {
-		memcpy(filter+idx+1, &rdr->sa[0][0], 4);
-		memset(filter+idx+1+16, 0xFF, 4);
-	}
-	filter[idx+1+16] = 0xFF;
-	filter[1]++;
-	idx += 32;
-
-	filter[idx++]=EMM_SHARED;
-	filter[idx++]=0;
-	filter[idx+0]    = 0x86;
-	filter[idx+1]    = rdr->sa[0][0];
+	filter[idx++]=EMM_GLOBAL;
+	filter[idx++]=1; //not active
+	//FIXME: Dont now how to filter GLOBAL EMM's
+	filter[idx+0]    = 0xFF; //dummy
 	filter[idx+0+16] = 0xFF;
-	filter[idx+1+16] = 0xFF;
-	filter[1]++;
-	idx += 32;
-
-	filter[idx++]=EMM_SHARED;
-	filter[idx++]=0;
-	filter[idx+0]    = 0x8c;
-	filter[idx+1]    = rdr->sa[0][0];
-	filter[idx+0+16] = 0xFF;
-	filter[idx+1+16] = 0xFF;
 	filter[1]++;
 	idx += 32;
 
@@ -466,7 +403,6 @@ void dre_get_emm_filter(struct s_reader * rdr, uchar *filter)
 static int32_t dre_do_emm (struct s_reader * reader, EMM_PACKET * ep)
 {
   def_resp;
-  struct dre_data *csystem_data = reader->csystem_data;
 
   if (reader->caid == 0x4ae1) {
     if(ep->type == UNIQUE && ep->emm[39] == 0x3d)
@@ -489,7 +425,7 @@ static int32_t dre_do_emm (struct s_reader * reader, EMM_PACKET * ep)
             // check for shared address
             if(ep->emm[3]!=reader->sa[0][0])
                 return OK; // ignore, wrong address
-            emmcmd52[0x39] = csystem_data->provider;
+            emmcmd52[0x39] = reader->provider;
             if ((dre_cmd (emmcmd52)))
                 if ((cta_res[cta_lr - 2] != 0x90) || (cta_res[cta_lr - 1] != 0x00))
                     return ERROR; //exit if response is not 90 00
@@ -511,7 +447,7 @@ static int32_t dre_do_emm (struct s_reader * reader, EMM_PACKET * ep)
 					memcpy (emmcmd42 + 1, ep->emm + 42 + i*49, 48);
 					emmcmd42[49] = ep->emm[i*49 + 41]; //keynr
 					emmcmd42[50] = 0x58 + ep->emm[40]; //package nr
-			    emmcmd42[51] = csystem_data->provider;
+			    emmcmd42[51] = reader->provider;
 			    if ((dre_cmd (emmcmd42))) {
 			      if ((cta_res[cta_lr - 2] != 0x90) || (cta_res[cta_lr - 1] != 0x00))
 							return ERROR;		//exit if response is not 90 00
@@ -521,7 +457,7 @@ static int32_t dre_do_emm (struct s_reader * reader, EMM_PACKET * ep)
 			case SHARED:
 			default:
 		    memcpy (emmcmd42 + 1, ep->emm + 6, 48);
-		    emmcmd42[51] = csystem_data->provider;
+		    emmcmd42[51] = reader->provider;
 		    //emmcmd42[50] = ecmcmd42[2]; //TODO package nr could also be fixed 0x58
 		    emmcmd42[50] = 0x58;
 		    emmcmd42[49] = ep->emm[5];	//keynr
@@ -535,7 +471,7 @@ static int32_t dre_do_emm (struct s_reader * reader, EMM_PACKET * ep)
 		      memcpy (emmcmd42 + 1, ep->emm + 55, 7);	//TODO OR next two lines?
 		      /*memcpy (emmcmd42 + 1, ep->emm + 55, 7);  //FIXME either I cant count or my EMM log contains errors
 		         memcpy (emmcmd42 + 8, ep->emm + 67, 41); */
-		      emmcmd42[51] = csystem_data->provider;
+		      emmcmd42[51] = reader->provider;
 		      //emmcmd42[50] = ecmcmd42[2]; //TODO package nr could also be fixed 0x58
 		      emmcmd42[50] = 0x58;
 		      emmcmd42[49] = ep->emm[54];	//keynr

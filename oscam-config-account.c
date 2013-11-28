@@ -1,12 +1,8 @@
 #include "globals.h"
-#include "module-anticasc.h"
-#include "oscam-client.h"
 #include "oscam-conf.h"
 #include "oscam-conf-chk.h"
 #include "oscam-conf-mk.h"
-#include "oscam-config.h"
 #include "oscam-garbage.h"
-#include "oscam-lock.h"
 #include "oscam-string.h"
 
 #define cs_user "oscam.user"
@@ -33,15 +29,11 @@ static void account_c35_suppresscmd08_fn(const char *token, char *value, void *s
 
 static void account_ncd_keepalive_fn(const char *token, char *value, void *setting, FILE *f) {
 	int8_t *ncd_keepalive = setting;
-	int8_t def_value = 0;
-#ifdef MODULE_NEWCAMD
-	def_value = cfg.ncd_keepalive;
-#endif
 	if (value) {
-		*ncd_keepalive = (int8_t)strToIntVal(value, def_value);
+		*ncd_keepalive = (int8_t)strToIntVal(value, cfg.ncd_keepalive);
 		return;
 	}
-	if (*ncd_keepalive != def_value || cfg.http_full_cfg)
+	if (*ncd_keepalive != cfg.ncd_keepalive || cfg.http_full_cfg)
 		fprintf_conf(f, token, "%d\n", *ncd_keepalive);
 }
 
@@ -86,6 +78,7 @@ static void account_au_fn(const char *token, char *value, void *setting, FILE *f
 			account->aureader_list = ll_create("aureader_list");
 		if (streq(value, "1"))
 			account->autoau = 1;
+		strtolower(value);
 		ll_clear(account->aureader_list);
 		LL_ITER itr = ll_iter_create(configured_readers);
 		struct s_reader *rdr;
@@ -188,7 +181,7 @@ static void account_tuntab_fn(const char *token, char *value, void *setting, FIL
 	}
 }
 
-void group_fn(const char *token, char *value, void *setting, FILE *f) {
+static void account_group_fn(const char *token, char *value, void *setting, FILE *f) {
 	uint64_t *grp = setting;
 	if (value) {
 		char *ptr1, *saveptr1 = NULL;
@@ -208,28 +201,56 @@ void group_fn(const char *token, char *value, void *setting, FILE *f) {
 	}
 }
 
-void services_fn(const char *token, char *value, void *setting, FILE *f) {
-	SIDTABS *sidtabs = setting;
+static void account_services_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_auth *account = setting;
 	if (value) {
 		strtolower(value);
-		chk_services(value, sidtabs);
+		chk_services(value, &account->sidtabok, &account->sidtabno);
 		return;
 	}
-	value = mk_t_service(sidtabs);
+	value = mk_t_service((uint64_t)account->sidtabok, (uint64_t)account->sidtabno);
 	if (strlen(value) > 0 || cfg.http_full_cfg)
 		fprintf_conf(f, token, "%s\n", value);
 	free_mk_t(value);
 }
 
-void class_fn(const char *token, char *value, void *setting, FILE *f) {
-	CLASSTAB *cltab = setting;
-	if (value) {
+static void account_ident_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_auth *account = setting;
+	if (value) { // TODO: ftab clear
 		strtolower(value);
-		chk_cltab(value, cltab);
+		chk_ftab(value, &account->ftab, "user", account->usr, "provid");
 		return;
 	}
-	value = mk_t_cltab(cltab);
-	if (strlen(value) > 0 || cfg.http_full_cfg) {
+	if (account->ftab.nfilts || cfg.http_full_cfg) {
+		value = mk_t_ftab(&account->ftab);
+		fprintf_conf(f, token, "%s\n", value);
+		free_mk_t(value);
+	}
+}
+
+static void account_chid_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_auth *account = setting;
+	if (value) {
+		strtolower(value);
+		chk_ftab(value, &account->fchid, "user", account->usr, "chid");
+		return;
+	}
+	if (account->fchid.nfilts || cfg.http_full_cfg) {
+		value = mk_t_ftab(&account->fchid);
+		fprintf_conf(f, token, "%s\n", value);
+		free_mk_t(value);
+	}
+}
+
+static void account_class_fn(const char *token, char *value, void *setting, FILE *f) {
+	struct s_auth *account = setting;
+	if (value) {
+		strtolower(value);
+		chk_cltab(value, &account->cltab);
+		return;
+	}
+	if ((account->cltab.bn > 0 || account->cltab.an > 0) || cfg.http_full_cfg) {
+		value = mk_t_cltab(&account->cltab);
 		fprintf_conf(f, token, "%s\n", value);
 		free_mk_t(value);
 	}
@@ -270,15 +291,15 @@ static const struct config_list account_opts[] = {
 	DEF_OPT_FUNC("allowedprotocols"		, 0,							account_allowedprotocols_fn ),
 	DEF_OPT_FUNC("allowedtimeframe"		, 0,							account_allowedtimeframe_fn ),
 	DEF_OPT_FUNC("betatunnel"			, OFS(ttab),					account_tuntab_fn ),
-	DEF_OPT_FUNC("group"				, OFS(grp),						group_fn ),
-	DEF_OPT_FUNC("services"				, OFS(sidtabs),					services_fn ),
-	DEF_OPT_FUNC_X("ident"				, OFS(ftab),					ftab_fn, FTAB_ACCOUNT | FTAB_PROVID ),
-	DEF_OPT_FUNC_X("chid"				, OFS(fchid),					ftab_fn, FTAB_ACCOUNT | FTAB_CHID ),
-	DEF_OPT_FUNC("class"				, OFS(cltab),					class_fn ),
+	DEF_OPT_FUNC("group"				, OFS(grp),						account_group_fn ),
+	DEF_OPT_FUNC("services"				, 0,							account_services_fn ),
+	DEF_OPT_FUNC("ident"				, 0,							account_ident_fn ),
+	DEF_OPT_FUNC("chid"					, 0,							account_chid_fn ),
+	DEF_OPT_FUNC("class"				, 0,							account_class_fn ),
 #ifdef CS_CACHEEX
 	DEF_OPT_INT8("cacheex"				, OFS(cacheex.mode),			0 ),
 	DEF_OPT_INT8("cacheex_maxhop"		, OFS(cacheex.maxhop),			0 ),
-	DEF_OPT_FUNC("cacheex_ecm_filter"	, OFS(cacheex.filter_caidtab),	cacheex_hitvaluetab_fn ),
+	DEF_OPT_FUNC("cacheex_ecm_filter"	, OFS(cacheex.filter_caidtab),	hitvaluetab_fn ),
 	DEF_OPT_UINT8("cacheex_drop_csp"	, OFS(cacheex.drop_csp),		0 ),
 	DEF_OPT_UINT8("cacheex_allow_request"	, OFS(cacheex.allow_request),	1 ),
 #endif
@@ -431,33 +452,4 @@ int32_t write_userdb(void)
 		fprintf(f, "\n");
 	}
 	return flush_config_file(f, cs_user);
-}
-
-void cs_accounts_chk(void)
-{
-	struct s_auth *account1,*account2;
-	struct s_auth *new_accounts = init_userdb();
-	cs_writelock(&config_lock);
-	struct s_auth *old_accounts = cfg.account;
-	for (account1 = cfg.account; account1; account1 = account1->next) {
-		for (account2 = new_accounts; account2; account2 = account2->next) {
-			if (!strcmp(account1->usr, account2->usr)) {
-				account2->cwfound    = account1->cwfound;
-				account2->cwcache    = account1->cwcache;
-				account2->cwnot      = account1->cwnot;
-				account2->cwtun      = account1->cwtun;
-				account2->cwignored  = account1->cwignored;
-				account2->cwtout     = account1->cwtout;
-				account2->emmok      = account1->emmok;
-				account2->emmnok     = account1->emmnok;
-				account2->firstlogin = account1->firstlogin;
-				ac_copy_vars(account1, account2);
-			}
-		}
-	}
-	cs_reinit_clients(new_accounts);
-	cfg.account = new_accounts;
-	init_free_userdb(old_accounts);
-	ac_clear();
-	cs_writeunlock(&config_lock);
 }

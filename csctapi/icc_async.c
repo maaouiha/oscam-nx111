@@ -73,10 +73,8 @@ int32_t ICC_Async_Device_Init (struct s_reader *reader)
 	int32_t ret = reader->crdr.reader_init(reader);
 	if (ret == OK)
 		rdr_debug_mask(reader, D_IFD, "Device %s succesfully opened", reader->device);
-	else {
-		NULLFREE(reader->crdr_data);
+	else
 		rdr_debug_mask(reader, D_IFD, "ERROR: Can't open %s device", reader->device);
-	}
 	return ret;
 }
 
@@ -225,13 +223,16 @@ int32_t ICC_Async_CardWrite (struct s_reader *reader, unsigned char *command, ui
 
 int32_t ICC_Async_GetTimings (struct s_reader * reader, uint32_t wait_etu)
 {
-	int32_t timeout = ETU_to_us(reader, wait_etu);
-	rdr_debug_mask(reader, D_IFD, "Setting timeout to %i ETU (%d us)", wait_etu, timeout );
+	int32_t timeout = 0;
 	if (reader->crdr.timings_in_etu){
-		return wait_etu;
-		
+		timeout = wait_etu;
+		rdr_debug_mask(reader, D_IFD, "Setting timeout to %i ETU (%d us)", wait_etu, ETU_to_us(reader, timeout));
 	}
-	else return timeout;
+	else {
+		timeout = ETU_to_us(reader, wait_etu);
+		rdr_debug_mask(reader, D_IFD, "Setting timeout to %i ETU (%d us)", wait_etu, timeout);
+	}
+	return timeout;
 }
 
 int32_t ICC_Async_Transmit (struct s_reader *reader, uint32_t size, unsigned char * data, uint32_t delay, uint32_t timeout)
@@ -268,7 +269,6 @@ int32_t ICC_Async_Close (struct s_reader *reader)
 {
 	rdr_debug_mask(reader, D_IFD, "Closing device %s", reader->device);
 	call(reader->crdr.close(reader));
-	NULLFREE(reader->crdr_data);
 	rdr_debug_mask(reader, D_IFD, "Device %s succesfully closed", reader->device);
 	return OK;
 }
@@ -606,18 +606,22 @@ static int32_t InitCard (struct s_reader * reader, ATR * atr, unsigned char FI, 
 			ICC_Async_GetPLL_Divider(reader); // calculate pll divider for target cardmhz.
 		}
 
+	//set clock speed/baudrate must be done before timings
+	//because reader->current_baudrate is used in calculation of timings
 	F =	atr_f_table[FI];  //get the frequency divider also called clock rate conversion factor
-	if (reader->crdr.set_baudrate) {
-		reader->current_baudrate = DEFAULT_BAUDRATE;
 
-		if (deprecated == 0) {
-		
-			if (reader->protocol_type != ATR_PROTOCOL_TYPE_T14) { //dont switch for T14
-				uint32_t baud_temp = (double)D * ICC_Async_GetClockRate (reader->cardmhz) / (double)F;
-				rdr_log(reader, "Setting baudrate to %d bps", baud_temp);
+	reader->current_baudrate = DEFAULT_BAUDRATE;
+
+	if (deprecated == 0) {
+		uint32_t baud_temp;
+		if (reader->protocol_type != ATR_PROTOCOL_TYPE_T14) { //dont switch for T14
+			if (reader->mhz > 2000 && reader->typ == R_INTERNAL) baud_temp = (uint32_t) 1/((1/(double)D)*((double)F/(double)(reader->cardmhz*10000)));
+			else baud_temp = (double)D * ICC_Async_GetClockRate (reader->cardmhz) / (double)F;
+			rdr_log(reader, "Setting baudrate to %d bps", baud_temp);
+			if (reader->crdr.set_baudrate) {
 				call (reader->crdr.set_baudrate(reader, baud_temp));
-				reader->current_baudrate = baud_temp;
 			}
+			reader->current_baudrate = baud_temp; //this is needed for all readers to calculate work_etu for timings
 		}
 	}
 	if (reader->mhz > 2000 && reader->typ == R_INTERNAL) reader->worketu = (double) ((1/(double)D)*((double)F/(double)reader->cardmhz)*100);
@@ -661,10 +665,17 @@ static int32_t InitCard (struct s_reader * reader, ATR * atr, unsigned char FI, 
 				rdr_debug_mask(reader, D_ATR, "Protocol: T=%i, WWT=%u, Clockrate=%u",
 					reader->protocol_type, WWT, reader->mhz * 10000);
 
-			reader->read_timeout = WWT; // Work waiting time used in T0 (max time to signal unresponsive card!)
-			reader->char_delay = GT+EGT; // Character delay is used on T0
-			rdr_debug_mask(reader, D_ATR, "Setting timings: timeout=%u ETU, block_delay=%u ETU, char_delay=%u ETU",
-				reader->read_timeout, reader->block_delay, reader->char_delay);
+			if (reader->crdr.timings_in_etu) {
+				reader->read_timeout = WWT;
+				reader->char_delay = GT+EGT;
+				rdr_debug_mask(reader, D_ATR, "Setting timings: timeout=%u ETU, block_delay=%u ETU, char_delay=%u ETU",
+					reader->read_timeout, reader->block_delay, reader->char_delay);
+			} else {	
+				reader->read_timeout = ETU_to_us(reader, WWT); // Work waiting time used in T0 (max time to signal unresponsive card!)
+				reader->char_delay = ETU_to_us(reader, GT+EGT); // Character delay is used on T0
+				rdr_debug_mask(reader, D_ATR, "Setting timings: timeout=%u us, block_delay=%u us, char_delay=%u us",
+					reader->read_timeout, reader->block_delay, reader->char_delay);
+			}
 			break;
 		}
 		case ATR_PROTOCOL_TYPE_T1:
@@ -733,13 +744,21 @@ static int32_t InitCard (struct s_reader * reader, ATR * atr, unsigned char FI, 
 					reader->protocol_type, reader->ifsc,
 					reader->CWT, reader->BWT,
 					BGT, (edc == EDC_LRC) ? "LRC" : "CRC", N);
+
+				if (reader->crdr.timings_in_etu) {
 					reader->read_timeout = reader->BWT;
 					reader->block_delay = BGT;
 					reader->char_delay = GT+EGT;
 					rdr_debug_mask(reader, D_ATR, "Setting timings: reader timeout=%u ETU, block_delay=%u ETU, char_delay=%u ETU",
 						reader->read_timeout, reader->block_delay, reader->char_delay);
-
-				break;
+				} else {
+					reader->read_timeout = ETU_to_us(reader, reader->BWT);
+					reader->block_delay = ETU_to_us(reader, BGT);
+					reader->char_delay = ETU_to_us(reader, GT+EGT);
+					rdr_debug_mask(reader, D_ATR, "Setting timings: reader timeout=%u us, block_delay=%u us, char_delay=%u us",
+						reader->read_timeout, reader->block_delay, reader->char_delay);
+				}
+			break;
 		}
 			
 	 default:
@@ -748,13 +767,8 @@ static int32_t InitCard (struct s_reader * reader, ATR * atr, unsigned char FI, 
 	}//switch
 	SetRightParity (reader); // some reader devices need to get set the right parity
 
-	uint32_t ETU = F / D;
-	
-	if (atr->hbn >= 6 && !memcmp(atr->hb, "IRDETO", 6) && reader->protocol_type == ATR_PROTOCOL_TYPE_T14){
-		ETU = 0;	// for Irdeto T14 cards, do not set ETU
-		reader->worketu *=2; // overclocked T14 needs this otherwise high ecm reponses
-	}
-		
+	uint32_t ETU = 0; // for Irdeto T14 cards, do not set ETU
+	if (!(atr->hbn >= 6 && !memcmp(atr->hb, "IRDETO", 6) && reader->protocol_type == ATR_PROTOCOL_TYPE_T14)) ETU = F / D;
 	if (reader->crdr.write_settings) {
 		call(reader->crdr.write_settings(reader, ETU, EGT, 5, I, (uint16_t) F, (unsigned char)D, N));
 	} else if (reader->crdr.write_settings2) {

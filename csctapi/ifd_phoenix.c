@@ -106,14 +106,17 @@ int32_t Phoenix_Reset (struct s_reader * reader, ATR * atr)
 		unsigned char buf[ATR_MAX_SIZE];
 		int32_t parity[3] = {PARITY_EVEN, PARITY_ODD, PARITY_NONE};
 
-		call (IO_Serial_SetBaudrate(reader, DEFAULT_BAUDRATE));
+		if ( ! reader->ins7e11_fast_reset ) {
+			call (IO_Serial_SetBaudrate(reader, DEFAULT_BAUDRATE));
+		}
+		else {
+			rdr_log(reader, "Doing fast reset");
+		}
 
 		for(i=0; i<3; i++) {
-			if (reader->crdr.flush) IO_Serial_Flush(reader);
-			if (reader->crdr.set_parity) IO_Serial_SetParity (reader, parity[i]);
-
+			
 			ret = ERROR;
-
+			
 			IO_Serial_Ioctl_Lock(reader, 1);
 			if (reader_use_gpio(reader))
 				set_gpio(reader, 0);
@@ -121,6 +124,8 @@ int32_t Phoenix_Reset (struct s_reader * reader, ATR * atr)
 				IO_Serial_RTS_Set(reader);
 
 			cs_sleepms(50);
+			if (reader->crdr.flush) IO_Serial_Flush(reader);
+			if (reader->crdr.set_parity) IO_Serial_SetParity (reader, parity[i]);
 
 			// felix: set card reset hi (inactive)
 			if (reader_use_gpio(reader))

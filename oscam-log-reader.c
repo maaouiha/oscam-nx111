@@ -4,8 +4,6 @@
 #include "oscam-log-reader.h"
 #include "oscam-reader.h"
 
-extern int log_remove_sensitive;
-
 static char *debug_mask_txt(int mask) {
 	switch (mask) {
 		case D_EMM    : return "EMM: ";
@@ -71,7 +69,7 @@ void rdr_log_sensitive(struct s_reader * reader, char *fmt, ...) {
 }
 
 void rdr_debug_mask(struct s_reader * reader, uint16_t mask, char *fmt, ...) {
-	if (config_enabled(WITH_DEBUG)) {
+	if (config_WITH_DEBUG()) {
 		char txt[2048];
 		va_list args;
 		va_start(args, fmt);
@@ -82,7 +80,7 @@ void rdr_debug_mask(struct s_reader * reader, uint16_t mask, char *fmt, ...) {
 }
 
 void rdr_debug_mask_sensitive(struct s_reader * reader, uint16_t mask, char *fmt, ...) {
-	if (config_enabled(WITH_DEBUG)) {
+	if (config_WITH_DEBUG()) {
 		char txt[2048];
 		va_list args;
 		va_start(args, fmt);
@@ -94,7 +92,7 @@ void rdr_debug_mask_sensitive(struct s_reader * reader, uint16_t mask, char *fmt
 }
 
 void rdr_ddump_mask(struct s_reader * reader, uint16_t mask, const uint8_t * buf, int n, char *fmt, ...) {
-	if (config_enabled(WITH_DEBUG)) {
+	if (config_WITH_DEBUG()) {
 		char txt[2048];
 		va_list args;
 		va_start(args, fmt);

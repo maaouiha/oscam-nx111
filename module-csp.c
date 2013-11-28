@@ -10,7 +10,6 @@
 #ifdef CS_CACHEEX
 
 #include "module-cacheex.h"
-#include "oscam-ecm.h"
 #include "oscam-net.h"
 
 #define TYPE_REQUEST   1
@@ -22,6 +21,10 @@
 static void * csp_server(struct s_client *client __attribute__((unused)), uchar *mbuf __attribute__((unused)), int32_t n __attribute__((unused)))
 {
 	return NULL;
+}
+
+static void csp_server_init(struct s_client * client) {
+	client->is_udp = 1;
 }
 
 static int32_t csp_recv(struct s_client *client, uchar *buf, int32_t l)
@@ -147,17 +150,22 @@ static int32_t csp_recv(struct s_client *client, uchar *buf, int32_t l)
 //
 void module_csp(struct s_module *ph)
 {
-  ph->ptab.nports = 1;
-  ph->ptab.ports[0].s_port = cfg.csp_port;
+  static PTAB ptab; //since there is always only 1 csp server running, this is threadsafe
+  ptab.ports[0].s_port = cfg.csp_port;
+  ph->ptab = &ptab;
+  ph->ptab->nports = 1;
 
   ph->desc="csp";
   ph->type=MOD_CONN_UDP;
   ph->large_ecm_support = 1;
   ph->listenertype = LIS_CSPUDP;
+  ph->multi=1;
   IP_ASSIGN(ph->s_ip, cfg.csp_srvip);
   ph->s_handler=csp_server;
+  ph->s_init=csp_server_init;
   ph->recv=csp_recv;
 //  ph->send_dcw=csp_send_dcw;
+  ph->c_multi=1;
 //  ph->c_init=csp_client_init;
 //  ph->c_recv_chk=csp_recv_chk;
 //  ph->c_send_ecm=csp_send_ecm;

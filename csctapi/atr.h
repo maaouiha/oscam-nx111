@@ -100,6 +100,7 @@ ATR;
 extern const uint32_t atr_fs_table[16];
 extern const uint32_t atr_f_table[16];
 extern const double atr_d_table[16];
+extern const uint32_t atr_i_table[4];
 
 /*
  * Exported functions declaraton

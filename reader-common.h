@@ -1,14 +1,15 @@
 #ifndef READER_COMMON_H_
 #define READER_COMMON_H_
 
+#define ADDRLEN      4    // Address length in EMM commands
+#define MAX_PROV     16
+
 //Warning: OK = 0 and ERROR = 1 in csctapi !!!
 #define SKIPPED 2
-#define OK      1
-#define ERROR   0
-
+#define OK			1
+#define ERROR 	0
 #include "csctapi/atr.h" 
 #include "oscam-string.h"
-#include "oscam-reader.h"
 
 int32_t reader_cmd2icc(struct s_reader *reader, const uchar *buf, const int32_t l, uchar *response, uint16_t *response_length);
 int32_t card_write(struct s_reader *reader, const uchar *, const uchar *, uchar *, uint16_t *);
@@ -45,7 +46,6 @@ void cardreader_checkhealth(struct s_client *cl, struct s_reader *rdr);
 int32_t cardreader_do_emm(struct s_reader *reader, EMM_PACKET *ep);
 void cardreader_process_ecm(struct s_reader *reader, struct s_client *cl, ECM_REQUEST *er);
 void cardreader_get_card_info(struct s_reader *reader);
-int32_t check_sct_len(const unsigned char *data, int32_t off);
 #else
 static inline void cardreader_init_locks(void) { }
 static inline bool cardreader_init(struct s_reader *UNUSED(reader)) { return true; }

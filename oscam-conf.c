@@ -1,6 +1,5 @@
 #include "globals.h"
 #include "oscam-conf.h"
-#include "oscam-config.h"
 #include "oscam-files.h"
 #include "oscam-garbage.h"
 #include "oscam-string.h"
@@ -98,17 +97,6 @@ int config_list_parse(const struct config_list *clist, const char *token, char *
 			}
 			return 1;
 		}
-		case OPT_HEX_ARRAY: {
-			uint8_t *hex_array = var;
-			if (!strlen(value))
-				memset(hex_array, 0, c->def.array_size);
-			else if (key_atob_l(value, hex_array, c->def.array_size * 2)) {
-				memset(hex_array, 0, c->def.array_size);
-				fprintf(stderr, "WARNING: Config value for '%s' (%s, len=%zu) requires %d chars.\n",
-					token, value, strlen(value), c->def.array_size * 2);
-			}
-			return 1;
-		}
 		case OPT_FUNC: {
 			c->ops.process_fn(token, value, var, NULL);
 			return 1;
@@ -175,20 +163,6 @@ void config_list_save_ex(FILE *f, const struct config_list *clist, void *config_
 			char *val = var;
 			if (save_all || !streq(val, c->def.d_char)) {
 				fprintf_conf(f, c->config_name, "%s\n", val[0] ? val : "");
-			}
-			continue;
-		}
-		case OPT_HEX_ARRAY: {
-			uint8_t *hex_array = var;
-			uint32_t ok = check_filled(hex_array, c->def.array_size);
-			if (save_all || ok) {
-				fprintf_conf(f, c->config_name, "%s", ""); // it should not have \n at the end
-				if (ok) {
-					for (ok = 0; ok < c->def.array_size; ok++) {
-						fprintf(f, "%02X", hex_array[ok]);
-					}
-				}
-				fprintf(f, "\n");
 			}
 			continue;
 		}
@@ -264,11 +238,6 @@ void config_list_set_defaults(const struct config_list *clist, void *config_data
 				cs_strncpy(scfg, c->def.d_char, c->str_size);
 			break;
 		}
-		case OPT_HEX_ARRAY: {
-			uint8_t *hex_array = var;
-			memset(hex_array, 0, c->def.array_size);
-			break;
-		}
 		case OPT_FUNC: {
 			c->ops.process_fn((const char *)c->config_name, "", var, NULL);
 			break;
@@ -293,9 +262,6 @@ void config_list_free_values(const struct config_list *clist, void *config_data)
 		if (c->opt_type == OPT_STRING) {
 			char **scfg = var;
 			NULLFREE(*scfg);
-		}
-		if (c->free_value && (c->opt_type == OPT_FUNC || c->opt_type == OPT_FUNC_EXTRA)) {
-			c->free_value(var);
 		}
 	}
 	return;
@@ -377,15 +343,17 @@ void config_set_value(const struct config_sections *conf, char *section, const c
 }
 
 static FILE *__open_config_file(const char *conf_filename, bool die_on_err) {
-	char filename[256];
-	FILE *f = fopen(get_config_filename(filename, sizeof(filename), conf_filename), "r");
+	unsigned int len = strlen(cs_confdir) + strlen(conf_filename) + 8;
+	char filename[len];
+	snprintf(filename,  len, "%s%s", cs_confdir, conf_filename);
+	FILE *f = fopen(filename, "r");
 	if (!f) {
 		if (die_on_err) {
 			fprintf(stderr, "ERROR: Cannot open file \"%s\" (errno=%d %s)", filename, errno, strerror(errno));
 			fprintf(stderr, "\n");
 			exit(1);
 		} else {
-			cs_debug_mask(D_TRACE, "INFO: Cannot open file \"%s\" (errno=%d %s)", filename, errno, strerror(errno));
+			cs_log("ERROR: Cannot open file \"%s\" (errno=%d %s)", filename, errno, strerror(errno));
 		}
 		return NULL;
 	}
@@ -402,9 +370,9 @@ FILE *open_config_file_or_die(const char *conf_filename) {
 
 
 FILE *create_config_file(const char *conf_filename) {
-	char temp_file[256];
-	get_config_filename(temp_file, sizeof(temp_file), conf_filename);
-	strncat(temp_file, ".tmp", sizeof(temp_file) - strlen(temp_file) - 1);
+	unsigned int len = strlen(cs_confdir) + strlen(conf_filename) + 8;
+	char temp_file[len];
+	snprintf(temp_file,  len, "%s%s.tmp", cs_confdir, conf_filename);
 	FILE *f = fopen(temp_file, "w");
 	if (!f) {
 		cs_log("ERROR: Cannot create file \"%s\" (errno=%d %s)", temp_file, errno, strerror(errno));
@@ -419,12 +387,11 @@ FILE *create_config_file(const char *conf_filename) {
 }
 
 bool flush_config_file(FILE *f, const char *conf_filename) {
-	char dst_file[256], tmp_file[256], bak_file[256];
-	get_config_filename(dst_file, sizeof(dst_file), conf_filename);
-	memcpy(tmp_file, dst_file, sizeof(tmp_file));
-	memcpy(bak_file, dst_file, sizeof(bak_file));
-	strncat(tmp_file, ".tmp", sizeof(tmp_file) - strlen(tmp_file) - 1);
-	strncat(bak_file, ".bak", sizeof(bak_file) - strlen(bak_file) - 1);
+	unsigned int len = strlen(cs_confdir) + strlen(conf_filename) + 8;
+	char temp_file[len], destfile[len], bakfile[len];
+	snprintf(destfile, len, "%s%s"    , cs_confdir, conf_filename);
+	snprintf(temp_file,  len, "%s%s.tmp", cs_confdir, conf_filename);
+	snprintf(bakfile,  len, "%s%s.bak", cs_confdir, conf_filename);
 	fclose(f);
-	return safe_overwrite_with_bak(dst_file, tmp_file, bak_file, 0);
+	return safe_overwrite_with_bak(destfile, temp_file, bakfile, 0);
 }

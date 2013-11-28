@@ -2,18 +2,14 @@
 
 #ifdef CS_CACHEEX
 
-#include "cscrypt/md5.h"
 #include "module-cacheex.h"
-#include "module-cw-cycle-check.h"
 #include "oscam-chk.h"
 #include "oscam-client.h"
 #include "oscam-conf.h"
-#include "oscam-ecm.h"
 #include "oscam-lock.h"
 #include "oscam-net.h"
 #include "oscam-string.h"
 #include "oscam-time.h"
-#include "oscam-work.h"
 
 #define cs_cacheex_matcher "oscam.cacheex"
 
@@ -21,13 +17,14 @@ extern uint8_t cc_node_id[8];
 extern uint8_t camd35_node_id[8];
 extern CS_MUTEX_LOCK ecmcache_lock;
 extern struct ecm_request_t *ecmcwcache;
-extern CS_MUTEX_LOCK hitcache_lock;
+extern struct s_module modules[CS_MAX_MOD];
 
 uint8_t cacheex_peer_id[8];
-
 static LLIST *invalid_cws;
-static struct csp_ce_hit_t *cspec_hitcache;
-static uint32_t cspec_hitcache_size;
+
+extern CS_MUTEX_LOCK hitcache_lock;
+struct csp_ce_hit_t *cspec_hitcache = NULL;
+uint32_t cspec_hitcache_size = 0;
 
 void cacheex_init(void) {
 	// Init random node id
@@ -159,7 +156,7 @@ void cacheex_cache_push(ECM_REQUEST *er)
 	for (cl=first_client->next; cl; cl=cl->next) {
 		if (er->cacheex_src != cl) {
 			if (cl->typ == 'c' && !cl->dup && cl->account && cl->account->cacheex.mode == 2) { //send cache over user
-				if (get_module(cl)->c_cache_push // cache-push able
+				if (modules[cl->ctyp].c_cache_push // cache-push able
 						&& (!grp || (cl->grp & grp)) //Group-check
 						&& chk_srvid(cl, er) //Service-check
 						&& (chk_caid(er->caid, &cl->ctab) > 0))  //Caid-check
@@ -259,7 +256,7 @@ inline int8_t cacheex_match_alias(struct s_client *cl, ECM_REQUEST *er, ECM_REQU
 	return 0;
 }
 
-static pthread_mutex_t invalid_cws_mutex;
+static pthread_mutex_t invalid_cws_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void add_invalid_cw(uint8_t *cw) {
 	pthread_mutex_lock(&invalid_cws_mutex);
@@ -372,14 +369,12 @@ static int32_t cacheex_add_to_cache_int(struct s_client *cl, ECM_REQUEST *er, in
 //	}
 
 	if (!ecm) {
-		uint8_t cwcycle_act = cwcycle_check_act(er->caid);
 		if (er->rc < E_NOTFOUND) { // Do NOT add cacheex - not founds!
-			if (!cwcycle_act) {
-				cs_writelock(&ecmcache_lock);
-				er->next = ecmcwcache;
-				ecmcwcache = er;
-				cs_writeunlock(&ecmcache_lock);
-			}
+			cs_writelock(&ecmcache_lock);
+			er->next = ecmcwcache;
+			ecmcwcache = er;
+			cs_writeunlock(&ecmcache_lock);
+
 			er->selected_reader = cl->reader;
 
 			cacheex_cache_push(er);  //cascade push!
@@ -391,10 +386,9 @@ static int32_t cacheex_add_to_cache_int(struct s_client *cl, ECM_REQUEST *er, in
 			if (cl->account)
 				cl->account->cwcacheexgot++;
 			first_client->cwcacheexgot++;
-			if (cwcycle_act)
-				er->rc = E_NOTFOUND; //need to free
 		}
-		debug_ecm(D_CACHEEX, "got pushed %sECM %s from %s (%s)", (er->rc == E_UNHANDLED)?"request ":"", buf, csp ? "csp" : username(cl),(cwcycle_act)?"on":"off");
+
+		debug_ecm(D_CACHEEX | D_CSPCWC, "got pushed %sECM %s from %s", (er->rc == E_UNHANDLED)?"request ":"", buf, csp ? "csp" : username(cl));
 
 		return er->rc < E_NOTFOUND ? 1 : 0;
 	} else {
@@ -584,8 +578,7 @@ static struct s_cacheex_matcher *cacheex_matcher_read_int(void) {
 		}
 	}
 
-	if (count)
-		cs_log("%d entries read from %s", count, cs_cacheex_matcher);
+	cs_log("%d entries read from %s", count, cs_cacheex_matcher);
 
 	fclose(fp);
 
@@ -614,7 +607,10 @@ static int32_t cacheex_ecm_hash_calc(uchar *buf, int32_t n) {
 }
 
 void cacheex_update_hash(ECM_REQUEST *er) {
-	er->csp_hash = cacheex_ecm_hash_calc(er->ecm+3, er->ecmlen-3);
+	int32_t offset = 3;
+	if ((er->caid >> 8) == 0x17)  // hash fix for betatunnel
+		offset = 13;
+	er->csp_hash = cacheex_ecm_hash_calc(er->ecm+offset, er->ecmlen-offset);
 }
 
 /**
@@ -623,10 +619,9 @@ void cacheex_update_hash(ECM_REQUEST *er) {
 
 void add_hitcache(struct s_client *cl, ECM_REQUEST *er, ECM_REQUEST *ecm) {
 	bool upd_hit = true;
-	if (!cfg.cacheex_wait_timetab.n)
+	if (!cfg.csp_wait_timetab.n)
 		return;
-	uint32_t cacheex_wait_time = get_cacheex_wait_time(er,NULL);
-	if (!cacheex_wait_time)
+	if (!get_csp_wait_time(er,NULL))
 		return;
 	if (er->rc < E_NOTFOUND) {
 
@@ -644,7 +639,7 @@ void add_hitcache(struct s_client *cl, ECM_REQUEST *er, ECM_REQUEST *ecm) {
 				}
 			}
 
-			if (er->rc >= ecm->rc && er->rc < E_NOTFOUND && (ecm->tps.millitm - er->tps.millitm) > 0 && cacheex_wait_time) {
+			if (er->rc >= ecm->rc && er->rc < E_NOTFOUND && (ecm->tps.millitm - er->tps.millitm) > 0 && get_csp_wait_time(er, NULL)) {
 				cs_debug_mask(D_CACHEEX|D_CSPCWC,"[ADD_HITCACHE] skip add too old");
 				return; //check ignored duplicate time, is over wait time don't add hit cache
 			}
@@ -769,22 +764,22 @@ void cleanup_hitcache(void) {
 	}
 }
 
-uint32_t get_cacheex_wait_time(ECM_REQUEST *er, struct s_client *cl) {
+uint32_t get_csp_wait_time(ECM_REQUEST *er, struct s_client *cl) {
 	int32_t i,dwtime= -1,awtime=-1;
 	CSPCEHIT *ch;
 
-	for (i = 0; i < cfg.cacheex_wait_timetab.n; i++) {
-		if (i == 0 && cfg.cacheex_wait_timetab.caid[i] <= 0) {
-			dwtime = cfg.cacheex_wait_timetab.dwtime[i];
-			awtime = cfg.cacheex_wait_timetab.awtime[i];
+	for (i = 0; i < cfg.csp_wait_timetab.n; i++) {
+		if (i == 0 && cfg.csp_wait_timetab.caid[i] <= 0) {
+			dwtime = cfg.csp_wait_timetab.dwtime[i];
+			awtime = cfg.csp_wait_timetab.awtime[i];
 			continue; //check other, only valid for unset
 		}
 
-		if (cfg.cacheex_wait_timetab.caid[i] == er->caid || cfg.cacheex_wait_timetab.caid[i] == er->caid>>8 || ((cfg.cacheex_wait_timetab.cmask[i]>=0 && (er->caid & cfg.cacheex_wait_timetab.cmask[i]) == cfg.cacheex_wait_timetab.caid[i]) || cfg.cacheex_wait_timetab.caid[i] == -1)) {
-			if ((cfg.cacheex_wait_timetab.prid[i]>=0 && cfg.cacheex_wait_timetab.prid[i] == (int32_t)er->prid) || cfg.cacheex_wait_timetab.prid[i] == -1) {
-				if ((cfg.cacheex_wait_timetab.srvid[i]>=0 && cfg.cacheex_wait_timetab.srvid[i] == er->srvid) || cfg.cacheex_wait_timetab.srvid[i] == -1) {
-					dwtime = cfg.cacheex_wait_timetab.dwtime[i];
-					awtime = cfg.cacheex_wait_timetab.awtime[i];
+		if (cfg.csp_wait_timetab.caid[i] == er->caid || cfg.csp_wait_timetab.caid[i] == er->caid>>8 || ((cfg.csp_wait_timetab.cmask[i]>=0 && (er->caid & cfg.csp_wait_timetab.cmask[i]) == cfg.csp_wait_timetab.caid[i]) || cfg.csp_wait_timetab.caid[i] == -1)) {
+			if ((cfg.csp_wait_timetab.prid[i]>=0 && cfg.csp_wait_timetab.prid[i] == (int32_t)er->prid) || cfg.csp_wait_timetab.prid[i] == -1) {
+				if ((cfg.csp_wait_timetab.srvid[i]>=0 && cfg.csp_wait_timetab.srvid[i] == er->srvid) || cfg.csp_wait_timetab.srvid[i] == -1) {
+					dwtime = cfg.csp_wait_timetab.dwtime[i];
+					awtime = cfg.csp_wait_timetab.awtime[i];
 					break;
 				}
 			}

@@ -1,4 +1,16 @@
 #include "globals.h"
+
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <net/if_dl.h>
+#include <ifaddrs.h>
+#elif defined(__SOLARIS__)
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <sys/sockio.h>
+#else
+#include <net/if.h>
+#endif
+
 #include "oscam-conf-mk.h"
 #include "oscam-net.h"
 #include "oscam-string.h"
@@ -155,15 +167,14 @@ char *mk_t_ftab(FTAB *ftab) {
  * Creates a string ready to write as a token into config or WebIf for the camd35 tcp ports. You must free the returned value through free_mk_t().
  */
 char *mk_t_camd35tcp_port(void) {
-#if defined(MODULE_CAMD35) || defined(MODULE_CAMD35_TCP)
 	int32_t i, j, pos = 0, needed = 1;
 
 	/* Precheck to determine how long the resulting string will maximally be (might be a little bit smaller but that shouldn't hurt) */
 	for(i = 0; i < cfg.c35_tcp_ptab.nports; ++i) {
 		/* Port is maximally 5 chars long, plus the @caid, plus the ";" between ports */
 		needed += 11;
-		if (cfg.c35_tcp_ptab.ports[i].ncd && cfg.c35_tcp_ptab.ports[i].ncd->ncd_ftab.filts[0].nprids > 1) {
-			needed += cfg.c35_tcp_ptab.ports[i].ncd->ncd_ftab.filts[0].nprids * 7;
+		if (cfg.c35_tcp_ptab.ports[i].ftab.filts[0].nprids > 1) {
+			needed += cfg.c35_tcp_ptab.ports[i].ftab.filts[0].nprids * 7;
 		}
 	}
 	char *value;
@@ -172,15 +183,15 @@ char *mk_t_camd35tcp_port(void) {
 	char *dot1 = "", *dot2;
 	for(i = 0; i < cfg.c35_tcp_ptab.nports; ++i) {
 
-		if (cfg.c35_tcp_ptab.ports[i].ncd && cfg.c35_tcp_ptab.ports[i].ncd->ncd_ftab.filts[0].caid) {
+		if (cfg.c35_tcp_ptab.ports[i].ftab.filts[0].caid) {
 			pos += snprintf(value + pos, needed-(value-saveptr), "%s%d@%04X", dot1,
 					cfg.c35_tcp_ptab.ports[i].s_port,
-					cfg.c35_tcp_ptab.ports[i].ncd->ncd_ftab.filts[0].caid);
+					cfg.c35_tcp_ptab.ports[i].ftab.filts[0].caid);
 
-			if (cfg.c35_tcp_ptab.ports[i].ncd->ncd_ftab.filts[0].nprids > 1) {
+			if (cfg.c35_tcp_ptab.ports[i].ftab.filts[0].nprids > 1) {
 				dot2 = ":";
-				for (j = 0; j < cfg.c35_tcp_ptab.ports[i].ncd->ncd_ftab.filts[0].nprids; ++j) {
-					pos += snprintf(value + pos, needed-(value-saveptr), "%s%X", dot2, cfg.c35_tcp_ptab.ports[i].ncd->ncd_ftab.filts[0].prids[j]);
+				for (j = 0; j < cfg.c35_tcp_ptab.ports[i].ftab.filts[0].nprids; ++j) {
+					pos += snprintf(value + pos, needed-(value-saveptr), "%s%X", dot2, cfg.c35_tcp_ptab.ports[i].ftab.filts[0].prids[j]);
 					dot2 = ",";
 				}
 			}
@@ -190,9 +201,6 @@ char *mk_t_camd35tcp_port(void) {
 		}
 	}
 	return value;
-#else
-	return NULL;
-#endif
 }
 
 #ifdef MODULE_CCCAM
@@ -286,18 +294,15 @@ char *mk_t_aeskeys(struct s_reader *rdr) {
  * Creates a string ready to write as a token into config or WebIf for the Newcamd Port. You must free the returned value through free_mk_t().
  */
 char *mk_t_newcamd_port(void) {
-#ifdef MODULE_NEWCAMD
 	int32_t i, j, k, pos = 0, needed = 1;
 
 	/* Precheck to determine how long the resulting string will maximally be (might be a little bit smaller but that shouldn't hurt) */
 	for(i = 0; i < cfg.ncd_ptab.nports; ++i) {
 		/* Port is maximally 5 chars long, plus the @caid, plus the ";" between ports */
 		needed += 11;
-		if (cfg.ncd_ptab.ports[i].ncd) {
-			if(cfg.ncd_ptab.ports[i].ncd->ncd_key_is_set) needed += 30;
-			if (cfg.ncd_ptab.ports[i].ncd->ncd_ftab.filts[0].nprids > 0) {
-				needed += cfg.ncd_ptab.ports[i].ncd->ncd_ftab.filts[0].nprids * 7;
-			}
+		if(cfg.ncd_ptab.ports[i].ncd_key_is_set) needed += 30;
+		if (cfg.ncd_ptab.ports[i].ftab.filts[0].nprids > 0) {
+			needed += cfg.ncd_ptab.ports[i].ftab.filts[0].nprids * 7;
 		}
 	}
 	char *value;
@@ -308,30 +313,25 @@ char *mk_t_newcamd_port(void) {
 		pos += snprintf(value + pos, needed-pos,  "%s%d", dot1, cfg.ncd_ptab.ports[i].s_port);
 
 		// separate DES Key for this port
-		if (cfg.ncd_ptab.ports[i].ncd) {
-			if(cfg.ncd_ptab.ports[i].ncd->ncd_key_is_set) {
-				pos += snprintf(value + pos, needed-pos, "{");
-				for (k = 0; k < (int32_t)sizeof(cfg.ncd_ptab.ports[i].ncd->ncd_key[k]); k++)
-					pos += snprintf(value + pos, needed-pos, "%02X", cfg.ncd_ptab.ports[i].ncd->ncd_key[k]);
-				pos += snprintf(value + pos, needed-pos, "}");
-			}
+		if(cfg.ncd_ptab.ports[i].ncd_key_is_set) {
+			pos += snprintf(value + pos, needed-pos, "{");
+			for (k = 0; k < 14; k++)
+				pos += snprintf(value + pos, needed-pos, "%02X", cfg.ncd_ptab.ports[i].ncd_key[k]);
+			pos += snprintf(value + pos, needed-pos, "}");
+		}
 
-			pos += snprintf(value + pos, needed-pos, "@%04X", cfg.ncd_ptab.ports[i].ncd->ncd_ftab.filts[0].caid);
+		pos += snprintf(value + pos, needed-pos, "@%04X", cfg.ncd_ptab.ports[i].ftab.filts[0].caid);
 
-			if (cfg.ncd_ptab.ports[i].ncd->ncd_ftab.filts[0].nprids > 0) {
-				dot2 = ":";
-				for (j = 0; j < cfg.ncd_ptab.ports[i].ncd->ncd_ftab.filts[0].nprids; ++j) {
-					pos += snprintf(value + pos, needed-pos, "%s%06X", dot2, (int)cfg.ncd_ptab.ports[i].ncd->ncd_ftab.filts[0].prids[j]);
-					dot2 = ",";
-				}
+		if (cfg.ncd_ptab.ports[i].ftab.filts[0].nprids > 0) {
+			dot2 = ":";
+			for (j = 0; j < cfg.ncd_ptab.ports[i].ftab.filts[0].nprids; ++j) {
+				pos += snprintf(value + pos, needed-pos, "%s%06X", dot2, (int)cfg.ncd_ptab.ports[i].ftab.filts[0].prids[j]);
+				dot2 = ",";
 			}
 		}
 		dot1=";";
 	}
 	return value;
-#else
-	return NULL;
-#endif
 }
 
 /*
@@ -383,20 +383,20 @@ char *mk_t_nano(uint16_t nano) {
 /*
  * Creates a string ready to write as a token into config or WebIf for the sidtab. You must free the returned value through free_mk_t().
  */
-char *mk_t_service(SIDTABS *sidtabs) {
+char *mk_t_service( uint64_t sidtabok, uint64_t sidtabno) {
 	int32_t i, pos;
 	char *dot;
 	char *value;
 	struct s_sidtab *sidtab = cfg.sidtab;
-	if (!sidtab || (!sidtabs->ok && !sidtabs->no) || !cs_malloc(&value, 1024)) return "";
+	if (!sidtab || (!sidtabok && !sidtabno) || !cs_malloc(&value, 1024)) return "";
 	value[0] = '\0';
 
 	for (i=pos=0,dot=""; sidtab; sidtab=sidtab->next,i++) {
-		if (sidtabs->ok&((SIDTABBITS)1<<i)) {
+		if (sidtabok&((SIDTABBITS)1<<i)) {
 			pos += snprintf(value + pos, 1024 - pos, "%s%s", dot, sidtab->label);
 			dot = ",";
 		}
-		if (sidtabs->no&((SIDTABBITS)1<<i)) {
+		if (sidtabno&((SIDTABBITS)1<<i)) {
 			pos += snprintf(value + pos, 1024 - pos, "%s!%s", dot, sidtab->label);
 			dot = ",";
 		}
@@ -591,7 +591,7 @@ char *mk_t_caidvaluetab(CAIDVALUETAB *tab)
 }
 
 #ifdef CS_CACHEEX
-char *mk_t_cacheex_valuetab(CECSPVALUETAB *tab){
+char *mk_t_cspvaluetab(CECSPVALUETAB *tab){
 	if (!tab->n) return "";
 	int32_t i, size = 2 + tab->n * (4 + 1 + 4 + 1 + 6 + 1 + 4 + 1 + 5 + 1 + 5 + 1); //caid&mask@provid$servid:awtime:dwtime","
 	char *buf;
@@ -631,7 +631,7 @@ char *mk_t_cacheex_valuetab(CECSPVALUETAB *tab){
 	return buf;
 }
 
-char *mk_t_cacheex_hitvaluetab(CECSPVALUETAB *tab){
+char *mk_t_hitvaluetab(CECSPVALUETAB *tab){
 	if (!tab->n) return "";
 	int32_t i, size = 2 + tab->n * (4 + 1 + 4 + 1 + 6 + 1 + 4 + 1); //caid&mask@provid$servid","
 	char *buf;

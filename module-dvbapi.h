@@ -1,8 +1,11 @@
-#ifndef MODULE_DVBAPI_H_
-#define MODULE_DVBAPI_H_
-
 #ifdef HAVE_DVBAPI
+
+#ifndef MODULEDVBAPI_H_
+#define MODULEDVBAPI_H_
+
+
 #include <sys/un.h>
+#include <dirent.h>
 
 #define TYPE_ECM 1
 #define TYPE_EMM 2
@@ -25,19 +28,6 @@
 #define MAX_FILTER 24
 
 #define BOX_COUNT 6
-
-#define BOXTYPE_DREAMBOX	1
-#define BOXTYPE_DUCKBOX	2
-#define BOXTYPE_UFS910	3
-#define BOXTYPE_DBOX2	4
-#define BOXTYPE_IPBOX	5
-#define BOXTYPE_IPBOX_PMT	6
-#define BOXTYPE_DM7000	7
-#define BOXTYPE_QBOXHD	8
-#define BOXTYPE_COOLSTREAM	9
-#define BOXTYPE_NEUMO	10
-#define BOXTYPE_PC		11
-#define BOXTYPES		11
 
 struct box_devices
 {
@@ -119,7 +109,7 @@ typedef struct demux_s
 	uchar hexserial[8];
 	struct s_reader *rdr;
 	char pmt_file[30];
-	time_t pmt_time;
+	int32_t pmt_time;
 #ifdef WITH_STAPI
 	uint32_t DescramblerHandle[PTINUM];
 	int32_t desc_pidcount;
@@ -231,20 +221,13 @@ void dvbapi_write_cw(int32_t demux_id, uchar *cw, int32_t idx);
 int32_t dvbapi_parse_capmt(unsigned char *buffer, uint32_t length, int32_t connfd, char *pmtfile);
 void request_cw(struct s_client *dvbapi_client, ECM_REQUEST *er);
 void dvbapi_try_next_caid(int32_t demux_id);
-void dvbapi_read_priority(void);
-void dvbapi_main_exit(void);
 
-#ifdef DVBAPI_LOG_PREFIX
 #undef cs_log
 #define cs_log(txt, x...)	cs_log_int(0, 1, NULL, 0, "dvbapi: "txt, ##x)
 #ifdef WITH_DEBUG
 	#undef cs_debug_mask
 	#define cs_debug_mask(x,txt,y...)	cs_log_int(x, 1, NULL, 0, "dvbapi: "txt, ##y)
 #endif
-#endif
 
-#else
-static inline void dvbapi_read_priority(void) { }
+#endif // MODULEDVBAPI_H_
 #endif // WITH_DVBAPI
-
-#endif // MODULE_DVBAPI_H_

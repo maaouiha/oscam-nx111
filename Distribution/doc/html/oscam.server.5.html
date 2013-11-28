@@ -72,7 +72,6 @@ reader protocol, <I>required</I>:
 <B>device</B> = <B>[&lt;readertype&gt;;]serial:serialnum|bus:device</B>|
 <BR>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<B>&lt;device|device:slot&gt;</B>|
 <BR>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<B>&lt;ip|hostname&gt;,&lt;port&gt;[,&lt;lport&gt;]</B>|
-<BR>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<B>&lt;ip|hostname&gt;,&lt;gboxpport&gt;,&lt;gboxlport&gt;</B>|
 <BR>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<B>pcsc</B>|
 <BR>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<B>&lt;0|1&gt;</B>&gt;|
 <BR>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<B>constantcw</B>
@@ -104,10 +103,6 @@ define local or remote reader
 <BR>&nbsp;<B>port</B>:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;TCP/IP&nbsp;port
 <P>
 <BR>&nbsp;<B>lport</B>:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;remapping&nbsp;to&nbsp;local&nbsp;TCP/IP&nbsp;port
-<P>
-<BR>&nbsp;<B>gboxpport</B>:&nbsp;&nbsp;&nbsp;TCP/IP&nbsp;port&nbsp;for&nbsp;remote&nbsp;gbox&nbsp;peer
-<P>
-<BR>&nbsp;<B>gboxlport</B>:&nbsp;&nbsp;&nbsp;TCP/IP&nbsp;port&nbsp;for&nbsp;local&nbsp;gbox&nbsp;peer
 <P>
 <BR>&nbsp;<B>PCSC</B>:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;number&nbsp;of&nbsp;PCSC&nbsp;reader,&nbsp;starting&nbsp;with&nbsp;0
 <P>
@@ -188,14 +183,14 @@ set card init mode for AzBox internal reader, default:none
 
 <B>cool_timeout_init</B> = <B>timeout</B>
 <DL COMPACT><DT><DD>
-set timeout for SC init in milli-seconds for Coolstream internal reader only, default:0
+set timeout for SC init in milli-seconds for Coolstream internal reader only, default:50
 </DL>
 
 <P>
 
 <B>cool_timeout_after_init</B> = <B>timeout</B>
 <DL COMPACT><DT><DD>
-set read/transmit timeout after SC init in milli-seconds for Coolstream internal reader only, default:0
+set read/transmit timeout after SC init in milli-seconds for Coolstream internal reader only, default:150
 </DL>
 
 <P>
@@ -304,14 +299,14 @@ key for newcamd remote reader encryption
 
 <B>user</B> = <B>name</B>
 <DL COMPACT><DT><DD>
-user for remote reader
+user for remote reader, overrides user of <B>account</B>, first come first serve
 </DL>
 
 <P>
 
 <B>password</B> = <B>password</B>
 <DL COMPACT><DT><DD>
-password for remote reader
+password for remote reader, overrides password of <B>account</B>, first come first serve
 </DL>
 
 <P>
@@ -402,7 +397,7 @@ example: auprovid = 123456
 
 <B>inactivitytimeout</B> = <B>seconds</B>
 <DL COMPACT><DT><DD>
-inactivity timeout for all TCP based remote readers, -1 = reconnect on network failure for newcamd based readers, even in idle, default:0
+inactivity timeout for all TCP based remote readers, default:0
 </DL>
 
 <P>
@@ -410,13 +405,6 @@ inactivity timeout for all TCP based remote readers, -1 = reconnect on network f
 <B>reconnecttimeout</B> = <B>seconds</B>
 <DL COMPACT><DT><DD>
 reconnect if missing answers from a remote reader, default:30
-</DL>
-
-<P>
-
-<B>connectoninit</B> = <B>0</B>|<B>1</B>
-<DL COMPACT><DT><DD>
-1 = allow newcamd connections to be established on startup although there isn't a request yet, default:0
 </DL>
 
 <P>
@@ -447,15 +435,6 @@ set EMM cache of local reader:
 <BR>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<B>16</B>&nbsp;=&nbsp;logging&nbsp;disabled&nbsp;AU
 <P>
 <BR>&nbsp;example:&nbsp;emmcache&nbsp;=&nbsp;1,3,2
-</DL>
-
-<P>
-
-<B>emmreassembly</B> = <B>0</B>|<B>1</B>
-<DL COMPACT><DT><DD>
-1 = enable EMM reassembly, should be set for Viaccess and Cryptoworks readers 
-if the client that you are using to send EMMs is reassembling them instead of 
-just sending them to OSCam for processing, default:1
 </DL>
 
 <P>
@@ -506,6 +485,13 @@ allow incoming ECM request (mode 2), default:1
 
 <P>
 
+<B>logport</B> = <B>0</B>|<B>port</B>
+<DL COMPACT><DT><DD>
+camd 3.x reader logport, camd 3.x UDP must be activated, only works if there's no camd 3.x cascading, 0 = disabled, default=0
+</DL>
+
+<P>
+
 <B>ecmwhitelist</B> = [<B>CAID</B>[@<B>provid</B>]:]<B>length</B>[,<B>length</B>]...[;[<B>CAID</B>[@<B>provid</B>]:]<B>length</B>[,<B>length</B>]...]...
 <DL COMPACT><DT><DD>
 set valid ECM length per CAID and provid in hex, default:none,provid=000000
@@ -532,13 +518,6 @@ number of different SIDs in ECMs allowed for an interval, default:0
 
 <P>
 
-<B>ecmnotfoundlimit</B> = <B>count</B>
-<DL COMPACT><DT><DD>
-number of ECMs with &quot;not found&quot; answer until the reader will be restarted, 0 = no limit, default:0
-</DL>
-
-<P>
-
 <B>resetcycle</B> = <B>count</B>
 <DL COMPACT><DT><DD>
 number of ECMs until reader reset is performed, 0 = disabled, default:0
@@ -556,20 +535,6 @@ restart instead of reset for resetcycle, default:0
 <B>ratelimitseconds</B> = <B>seconds</B>
 <DL COMPACT><DT><DD>
 interval for rate limit, default:0
-</DL>
-
-<P>
-
-<B>ecmunique</B> = <B>0</B>|<B>1</B>
-<DL COMPACT><DT><DD>
-1 = enable check for matching ECM hash in ratelimit slot , default:0
-</DL>
-
-<P>
-
-<B>srvidholdseconds </B> = <B>seconds</B>
-<DL COMPACT><DT><DD>
-time to keep service ID in ratelimit slot, during this time checkeding for ecmunique is disbaled, default:0
 </DL>
 
 <P>
@@ -779,41 +744,6 @@ reconnect again after ECM request timeout in milli-seconds, default:4000
 filters all readers with hops smaller than number, default:0
 </DL>
 
-<P>
-
-<B>gbox_my_password</B> = <B>password</B>
-<DL COMPACT><DT><DD>
-password for connection to local gbox peer, default:none
-</DL>
-
-<P>
-
-<B>gbox_reshare</B> = <B>level</B>
-<DL COMPACT><DT><DD>
-gbox reshare level of local cards, default:0
-</DL>
-
-<P>
-
-<B>gbox_max_distance</B> = <B>distance</B>
-<DL COMPACT><DT><DD>
-maximum distance to receive gbox peer cards, default:2
-</DL>
-
-<P>
-
-<B>gbox_max_ecm_send</B> = <B>number</B>
-<DL COMPACT><DT><DD>
-maximum of gbox peers ECMs will be send to, default:3
-</DL>
-
-<P>
-
-<B>gbox_group</B> = <B></B>
-<DL COMPACT><DT><DD>
-reader assingment to gbox group, default:none
-</DL>
-
 <A NAME="lbAF">&nbsp;</A>
 <H2>OVERCLOCKING</H2>
 
@@ -997,13 +927,13 @@ constant CW
 gbox reader
 <P>
 <BR>&nbsp;[reader]
-<BR>&nbsp;label&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;mygboxreader
-<BR>&nbsp;protocol&nbsp;=&nbsp;gbox
-<BR>&nbsp;device&nbsp;&nbsp;&nbsp;=&nbsp;192.168.0.4,45678,56789
-<BR>&nbsp;user&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;user4
-<BR>&nbsp;password&nbsp;=&nbsp;password4
-<BR>&nbsp;group&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;11
-<BR>&nbsp;caid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;1100
+<BR>&nbsp;label&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;mygboxreader
+<BR>&nbsp;protocol&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;gbox
+<BR>&nbsp;device&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;192.168.0.4,45678,56789
+<BR>&nbsp;user&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;user4
+<BR>&nbsp;password&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;password4
+<BR>&nbsp;group&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;11
+<BR>&nbsp;caid&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;=&nbsp;1100
 </DL>
 <A NAME="lbAI">&nbsp;</A>
 <H2>SEE ALSO</H2>

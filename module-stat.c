@@ -1,12 +1,10 @@
 #include "globals.h"
 
 #ifdef WITH_LB
-#include "cscrypt/md5.h"
 #include "module-cacheex.h"
 #include "module-cccam.h"
 #include "oscam-chk.h"
 #include "oscam-client.h"
-#include "oscam-ecm.h"
 #include "oscam-files.h"
 #include "oscam-lock.h"
 #include "oscam-string.h"
@@ -27,7 +25,7 @@
 #define DEFAULT_LOCK_TIMEOUT 1000
 
 static int32_t stat_load_save;
-static time_t last_housekeeping;
+static time_t last_housekeeping = 0;
 
 void init_stat(void)
 {
@@ -107,7 +105,7 @@ void load_stat_from_file(void)
 	FILE *file;
 
 	if (!cfg.lb_savepath) {
-		get_tmp_dir_filename(buf, sizeof(buf), "stat");
+		snprintf(buf, sizeof(buf), "%s/stat", get_tmp_dir());
 		fname = buf;
 	}
 	else
@@ -120,11 +118,9 @@ void load_stat_from_file(void)
 		return;
 	}
 	
-	if (!cs_malloc(&line, LINESIZE)) {
-		fclose(file);
+	if (!cs_malloc(&line, LINESIZE))
 		return;
-	}
-
+	
 	setvbuf(file, NULL, _IOFBF, 128*1024);
 
 	cs_debug_mask(D_LB, "loadbalancer: load statistics from %s", fname);
@@ -296,11 +292,9 @@ static void save_stat_to_file_thread(void)
 	stat_load_save = 0;
 	char buf[256];
 
-	set_thread_name(__func__);
-
 	char *fname;
 	if (!cfg.lb_savepath) {
-		get_tmp_dir_filename(buf, sizeof(buf), "stat");
+		snprintf(buf, sizeof(buf), "%s/stat", get_tmp_dir());
 		fname = buf;
 	}
 	else
@@ -1448,7 +1442,6 @@ static void housekeeping_stat_thread(void)
 	time_t cleanup_time = time(NULL) - (cfg.lb_stat_cleanup*60*60);
 	int32_t cleaned = 0;
 	struct s_reader *rdr;
-	set_thread_name(__func__);
 	LL_ITER itr = ll_iter_create(configured_readers);
 	cs_readlock(&readerlist_lock); //this avoids cleaning a reading during writing
 	while ((rdr = ll_iter_next(&itr))) {
@@ -1682,11 +1675,7 @@ void send_reader_stat(struct s_reader *rdr, ECM_REQUEST *er, struct s_ecm_answer
 
 	struct timeb tpe;
 	cs_ftime(&tpe);
-#ifndef CS_CACHEEX
-	int32_t ntime = comp_timeb(&tpe,&er->tps);
-#else
-	int32_t ntime = comp_timeb(&tpe, &er->cacheex_wait);
-#endif
+	int32_t ntime = 1000*(tpe.time-er->tps.time)+tpe.millitm-er->tps.millitm;
 	if (ntime < 1)
 		ntime = 1;
 

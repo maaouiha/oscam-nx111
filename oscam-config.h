@@ -1,57 +1,226 @@
 #ifndef OSCAM_CONFIG_H_
 #define OSCAM_CONFIG_H_
 
-char *get_config_filename(char *dest, size_t destlen, const char *filename);
+//
+// ADDONS
+//
 
-int32_t init_config(void);
-void    config_set(char *section, const char *token, char *value);
-void    config_free(void);
-int32_t write_config(void);
-
-void * read_cccamcfg(int32_t mode);
-void    chk_account(const char *token, char *value, struct s_auth *account);
-void    account_set_defaults(struct s_auth *auth);
-int32_t init_free_userdb(struct s_auth *auth);
-struct s_auth *init_userdb(void);
-int32_t write_userdb(void);
-void    cs_accounts_chk(void);
-
-void    chk_reader(char *token, char *value, struct s_reader *rdr);
-void    reader_set_defaults(struct s_reader *rdr);
-int32_t init_readerdb(void);
-void    free_reader(struct s_reader *rdr);
-int32_t free_readerdb(void);
-int32_t write_server(void);
-
-void    chk_sidtab(char *token, char *value, struct s_sidtab *sidtab);
-int32_t init_sidtab(void);
-void    init_free_sidtab(void);
-void    free_sidtab(struct s_sidtab *sidtab);
-int32_t write_services(void);
-
-int32_t chk_global_whitelist(ECM_REQUEST *er, uint32_t *line);
-void    global_whitelist_read(void);
-
-int32_t init_provid(void);
-int32_t init_srvid(void);
-int32_t init_tierid(void);
-void    init_len4caid(void);
-
-/* Shared parser functions */
-void check_caidtab_fn(const char *token, char *value, void *setting, FILE *f);
-void cacheex_valuetab_fn(const char *token, char *value, void *setting, FILE *f);
-void cacheex_hitvaluetab_fn(const char *token, char *value, void *setting, FILE *f);
-void class_fn(const char *token, char *value, void *setting, FILE *f);
-void group_fn(const char *token, char *value, void *setting, FILE *f);
-void services_fn(const char *token, char *value, void *setting, FILE *f);
-
-enum ftab_fn {
-	FTAB_ACCOUNT = 0x01,
-	FTAB_READER  = 0x02,
-	FTAB_PROVID  = 0x04,
-	FTAB_CHID    = 0x08,
-};
-
-void ftab_fn(const char *token, char *value, void *setting, long ftab_type, FILE *f);
-
+#ifndef WEBIF
+#define WEBIF
 #endif
+
+#ifndef TOUCH
+#define TOUCH
+#endif
+
+#ifndef WITH_SSL
+//#define WITH_SSL
+#endif
+
+#ifndef HAVE_DVBAPI
+#if defined(__linux__)
+#define HAVE_DVBAPI
+#endif
+#endif
+
+#ifndef IRDETO_GUESSING
+#define IRDETO_GUESSING
+#endif
+
+#ifndef CS_ANTICASC
+#define CS_ANTICASC
+#endif
+
+#ifndef WITH_DEBUG
+#define WITH_DEBUG
+#endif
+
+#ifndef WITH_LB
+#define WITH_LB
+#endif
+
+#ifndef LCDSUPPORT
+#define LCDSUPPORT
+#endif
+
+#ifndef LEDSUPPORT
+//#define LEDSUPPORT
+#endif
+
+#ifndef IPV6SUPPORT
+//#define IPV6SUPPORT
+#endif
+
+//
+// MODULES
+//
+
+#ifndef MODULE_MONITOR
+#define MODULE_MONITOR
+#endif
+
+#ifndef MODULE_CAMD33
+#define MODULE_CAMD33
+#endif
+
+#ifndef MODULE_CAMD35
+#define MODULE_CAMD35
+#endif
+
+#ifndef MODULE_CAMD35_TCP
+#define MODULE_CAMD35_TCP
+#endif
+
+#ifndef MODULE_NEWCAMD
+#define MODULE_NEWCAMD
+#endif
+
+#ifndef MODULE_CCCAM
+#define MODULE_CCCAM
+#endif
+
+#ifdef MODULE_CCCAM
+#ifndef MODULE_CCCSHARE
+#define MODULE_CCCSHARE
+#endif
+#endif
+
+
+#ifndef MODULE_GBOX
+#define MODULE_GBOX
+#endif
+
+#ifndef MODULE_RADEGAST
+#define MODULE_RADEGAST
+#endif
+
+#ifndef MODULE_SERIAL
+#define MODULE_SERIAL
+#endif
+
+#ifndef MODULE_CONSTCW
+#define MODULE_CONSTCW
+#endif
+
+#ifndef MODULE_PANDORA
+#define MODULE_PANDORA
+#endif
+
+#ifndef MODULE_GHTTP
+//#define MODULE_GHTTP
+#endif
+
+//
+// CARDREADER
+//
+
+#ifndef WITH_CARDREADER
+#define WITH_CARDREADER
+#endif
+
+#ifdef WITH_CARDREADER
+
+#ifndef READER_NAGRA
+#define READER_NAGRA
+#endif
+
+#ifndef READER_IRDETO
+#define READER_IRDETO
+#endif
+
+#ifndef READER_CONAX
+#define READER_CONAX
+#endif
+
+#ifndef READER_CRYPTOWORKS
+#define READER_CRYPTOWORKS
+#endif
+
+#ifndef READER_SECA
+#define READER_SECA
+#endif
+
+#ifndef READER_VIACCESS
+#define READER_VIACCESS
+#endif
+
+#ifndef READER_VIDEOGUARD
+#define READER_VIDEOGUARD
+#endif
+
+#ifndef READER_DRE
+#define READER_DRE
+#endif
+
+#ifndef READER_TONGFANG
+#define READER_TONGFANG
+#endif
+
+#ifndef READER_STREAMGUARD
+#define READER_STREAMGUARD
+#endif
+
+#ifndef READER_BULCRYPT
+#define READER_BULCRYPT
+#endif
+
+#ifndef CARDREADER_PHOENIX
+#define CARDREADER_PHOENIX
+#endif
+
+#ifndef CARDREADER_INTERNAL
+#define CARDREADER_INTERNAL
+#endif
+
+#ifndef CARDREADER_MP35
+#define CARDREADER_MP35
+#endif
+
+#ifndef CARDREADER_SC8IN1
+#define CARDREADER_SC8IN1
+#endif
+
+#ifndef CARDREADER_SMARGO
+#define CARDREADER_SMARGO
+#endif
+
+#ifndef CARDREADER_DB2COM
+#define CARDREADER_DB2COM
+#endif
+
+#ifdef WITH_PCSC
+#ifndef CARDREADER_PCSC
+#define CARDREADER_PCSC
+#endif
+#endif
+
+#ifdef WITH_LIBUSB
+#ifndef CARDREADER_SMART
+#define CARDREADER_SMART
+#endif
+#endif
+
+// CARDREADER_INTERNAL_{AZBOX,COOLAPI,SCI} are internal variables
+// do not touch them
+#if   defined(CARDREADER_INTERNAL) && defined(WITH_AZBOX)
+#define CARDREADER_INTERNAL_AZBOX
+#elif defined(CARDREADER_INTERNAL) && defined(WITH_COOLAPI)
+#define CARDREADER_INTERNAL_COOLAPI
+#elif defined(CARDREADER_INTERNAL)
+#define CARDREADER_INTERNAL_SCI
+#endif
+
+#ifdef WITH_STAPI
+#ifndef CARDREADER_STAPI
+#define CARDREADER_STAPI
+#endif
+#endif
+
+
+#endif // WITH_CARDREADER
+
+#ifndef CS_CACHEEX
+#define CS_CACHEEX
+#endif
+
+#endif //OSCAM_CONFIG_H_

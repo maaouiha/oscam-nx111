@@ -1,5 +1,6 @@
 #include "globals.h"
 #include <syslog.h>
+#include <stdlib.h>
 #include "module-monitor.h"
 #include "oscam-client.h"
 #include "oscam-garbage.h"
@@ -9,15 +10,15 @@
 #include "oscam-string.h"
 #include "oscam-time.h"
 
-extern char *syslog_ident;
-extern int32_t exit_oscam;
+extern struct s_module modules[CS_MAX_MOD];
 
 char *LOG_LIST = "log_list";
 
-static FILE *fp;
-static FILE *fps;
-static int8_t logStarted;
-static LLIST *log_list;
+static FILE *fp=(FILE *)0;
+static FILE *fps=(FILE *)0;
+static int8_t logStarted = 0;
+LLIST *log_list;
+char *vbuf;
 
 struct s_log {
 	char *txt;
@@ -29,9 +30,7 @@ struct s_log {
 };
 
 #if defined(WEBIF) || defined(MODULE_MONITOR)
-static CS_MUTEX_LOCK loghistory_lock;
-char *loghist = NULL;     // ptr of log-history
-char *loghistptr = NULL;
+CS_MUTEX_LOCK loghistory_lock;
 #endif
 
 #define LOG_BUF_SIZE 512
@@ -135,9 +134,10 @@ int32_t cs_open_logfiles(void)
 	}
 	// according to syslog docu: calling closelog is not necessary and calling openlog multiple times is safe
 	// We use openlog to set the default syslog settings so that it's possible to allow switching syslog on and off
-	openlog(syslog_ident, LOG_NDELAY | LOG_PID, LOG_DAEMON);
+	openlog("oscam", LOG_NDELAY, LOG_DAEMON);
 
-	cs_log_nolock(">> OSCam <<  cardserver %s, version " CS_VERSION ", build r" CS_SVN_VERSION " (" CS_TARGET ")", starttext);
+	cs_log_nolock(">> OSCam <<  cardserver %s, version " CS_VERSION ", build #" CS_SVN_VERSION " (" CS_TARGET ")", starttext);
+	cs_log_config();
 	return(fp <= (FILE *)0);
 }
 
@@ -174,7 +174,7 @@ void cs_reinit_loghist(uint32_t size)
 }
 #endif
 
-static time_t log_ts;
+static time_t log_ts = 0;
 
 static int32_t get_log_header(int32_t m, char *txt)
 {
@@ -199,7 +199,7 @@ static int32_t get_log_header(int32_t m, char *txt)
 
 static void write_to_log(char *txt, struct s_log *log, int8_t do_flush)
 {
-	(void)log; // Prevent warning when WEBIF, MODULE_MONITOR and CS_ANTICASC are disabled
+	char sbuf[16];
 
 #ifdef CS_ANTICASC
 	extern FILE *ac_log;
@@ -217,7 +217,7 @@ static void write_to_log(char *txt, struct s_log *log, int8_t do_flush)
 	cs_write_log(txt + 8, do_flush);
 
 #if defined(WEBIF) || defined(MODULE_MONITOR)
-	if (loghist && !exit_oscam) {
+	if (loghist && exit_oscam != 1) {
 		char *usrtxt = log->cl_text;
 		char *target_ptr = NULL;
 		int32_t target_len = strlen(usrtxt) + (strlen(txt) - 8) + 1;
@@ -247,8 +247,6 @@ static void write_to_log(char *txt, struct s_log *log, int8_t do_flush)
 	}
 #endif
 
-#if defined(MODULE_MONITOR)
-	char sbuf[16];
 	struct s_client *cl;
 	for (cl=first_client; cl ; cl=cl->next) {
 		if ((cl->typ == 'm') && (cl->monlvl>0) && cl->log) //this variable is only initialized for cl->typ = 'm'
@@ -265,7 +263,6 @@ static void write_to_log(char *txt, struct s_log *log, int8_t do_flush)
 			monitor_send_idx(cl, txt);
 		}
 	}
-#endif
 }
 
 static void write_to_log_int(char *txt, int8_t header_len)
@@ -319,18 +316,17 @@ static void write_to_log_int(char *txt, int8_t header_len)
 		ll_append(log_list, log);
 }
 
-static pthread_mutex_t log_mutex;
-static char log_txt[LOG_BUF_SIZE];
-static char dupl[LOG_BUF_SIZE/4];
-static char last_log_txt[LOG_BUF_SIZE];
-static time_t last_log_ts;
-static unsigned int last_log_duplicates;
+static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char last_log_txt[LOG_BUF_SIZE] = { 0 };
+static time_t last_log_ts = 0;
+static unsigned int last_log_duplicates = 0;
 
 void cs_log_int(uint16_t mask, int8_t lock __attribute__((unused)), const uchar *buf, int32_t n, const char *fmt, ...)
 {
 	if ((mask & cs_dblevel) || !mask ) {
 		va_list params;
 
+		static char log_txt[LOG_BUF_SIZE], dupl[LOG_BUF_SIZE/4];
 		int32_t dupl_header_len, repeated_line, i, len = 0;
 		pthread_mutex_lock(&log_mutex);
 		if (fmt)
@@ -339,30 +335,25 @@ void cs_log_int(uint16_t mask, int8_t lock __attribute__((unused)), const uchar 
 			len = get_log_header(1, log_txt);
 			vsnprintf(log_txt + len, sizeof(log_txt) - len, fmt, params);
 			va_end(params);
-			if (cfg.logduplicatelines) {
+			repeated_line = strcmp(last_log_txt, log_txt + len) == 0;
+			if (last_log_duplicates > 0) {
+				if (!last_log_ts) // Must be initialized once
+					last_log_ts = log_ts;
+				// Report duplicated lines when the new log line is different
+				// than the old or 60 seconds have passed.
+				if (!repeated_line || log_ts - last_log_ts >= 60) {
+					dupl_header_len = get_log_header(2, dupl);
+					snprintf(dupl + dupl_header_len - 1, sizeof(dupl) - dupl_header_len, "--- Skipped %u duplicated log lines ---", last_log_duplicates);
+					write_to_log_int(dupl, 0);
+					last_log_duplicates = 0;
+					last_log_ts = log_ts;
+				}
+			}
+			if (!repeated_line) {
 				memcpy(last_log_txt, log_txt + len, LOG_BUF_SIZE);
 				write_to_log_int(log_txt, len);
 			} else {
-				repeated_line = strcmp(last_log_txt, log_txt + len) == 0;
-				if (last_log_duplicates > 0) {
-					if (!last_log_ts) // Must be initialized once
-						last_log_ts = log_ts;
-					// Report duplicated lines when the new log line is different
-					// than the old or 60 seconds have passed.
-					if (!repeated_line || log_ts - last_log_ts >= 60) {
-						dupl_header_len = get_log_header(2, dupl);
-						snprintf(dupl + dupl_header_len - 1, sizeof(dupl) - dupl_header_len, "--- Skipped %u duplicated log lines ---", last_log_duplicates);
-						write_to_log_int(dupl, 0);
-						last_log_duplicates = 0;
-						last_log_ts = log_ts;
-					}
-				}
-				if (!repeated_line) {
-					memcpy(last_log_txt, log_txt + len, LOG_BUF_SIZE);
-					write_to_log_int(log_txt, len);
-				} else {
-					last_log_duplicates++;
-				}
+				last_log_duplicates++;
 			}
 		}
 		if (buf)
@@ -378,7 +369,7 @@ void cs_log_int(uint16_t mask, int8_t lock __attribute__((unused)), const uchar 
 	}
 }
 
-static void cs_close_log(void)
+void cs_close_log(void)
 {
 	//Wait for log close:
 	int32_t i = 0;
@@ -458,6 +449,30 @@ void logCWtoFile(ECM_REQUEST *er, uchar *cw){
 	fclose(pfCWL);
 }
 
+void cs_log_config(void)
+{
+  uchar buf[20];
+
+  if (cfg.nice!=99)
+    snprintf((char *)buf, sizeof(buf), ", nice=%d", cfg.nice);
+  else
+    buf[0]='\0';
+  cs_log_nolock("version=%s, build #%s, system=%s%s", CS_VERSION, CS_SVN_VERSION, CS_TARGET, buf);
+  cs_log_nolock("client max. idle=%d sec, debug level=%d, filter_sensitive=%d", cfg.cmaxidle, cs_dblevel, log_remove_sensitive);
+
+  if( cfg.max_log_size )
+    snprintf((char *)buf, sizeof(buf), "%d Kb", cfg.max_log_size);
+  else
+    cs_strncpy((char *)buf, "unlimited", sizeof(buf));
+#if defined(WEBIF) || defined(MODULE_MONITOR)
+  cs_log_nolock("max. logsize=%s, loghistorysize=%d bytes", buf, cfg.loghistorysize);
+#else
+	cs_log_nolock("max. logsize=%s bytes", buf);
+#endif
+  cs_log_nolock("client timeout=%u ms, fallback timeout=%u ms, cache delay=%d ms",
+         cfg.ctimeout, cfg.ftimeout, cfg.delay);
+}
+
 int32_t cs_init_statistics(void)
 {
 	if ((!fps) && (cfg.usrfile != NULL))
@@ -491,7 +506,10 @@ void cs_statistics(struct s_client * client)
 			cwps=0;
 
 		char channame[32];
-		get_servicename(client, client->last_srvid,client->last_caid, channame);
+		if (cfg.appendchaninfo)
+			get_servicename(client, client->last_srvid,client->last_caid, channame);
+		else
+			channame[0] = '\0';
 
 		int32_t lsec;
 		if ((client->last_caid == 0xFFFF) && (client->last_srvid == 0xFFFF))
@@ -530,7 +548,7 @@ void cs_statistics(struct s_client * client)
 				client->login,
 				client->last,
 				fullhours, mins, secs,
-				get_module(client)->desc,
+				modules[client->ctyp].desc,
 				client->last_caid,
 				client->last_srvid,
 				channame);
@@ -542,7 +560,6 @@ void cs_statistics(struct s_client * client)
 void log_list_thread(void)
 {
 	char buf[LOG_BUF_SIZE];
-	set_thread_name(__func__);
 	int last_count=ll_count(log_list), count, grow_count=0, write_count;
 	do {
 		LL_ITER it = ll_iter_create(log_list);
@@ -629,10 +646,3 @@ void cs_disable_log(int8_t disabled)
 	}
 }
 
-void log_free(void) {
-	cs_close_log();
-#if defined(WEBIF) || defined(MODULE_MONITOR)
-	free(loghist);
-	loghist = loghistptr = NULL;
-#endif
-}

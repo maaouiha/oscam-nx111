@@ -21,11 +21,9 @@ static void refresh_lcd_file(void) {
 	char temp_file[256];
 	char channame[32];
 
-	set_thread_name(__func__);
-
 	if(cfg.lcd_output_path == NULL){
-		get_tmp_dir_filename(targetfile, sizeof(targetfile), "oscam.lcd");
-		get_tmp_dir_filename(temp_file, sizeof(temp_file), "oscam.lcd.tmp");
+		snprintf(targetfile, sizeof(targetfile),"%s%s", get_tmp_dir(), "/oscam.lcd");
+		snprintf(temp_file, sizeof(temp_file), "%s%s.tmp", get_tmp_dir(), "/oscam.lcd");
 	} else {
 		snprintf(targetfile, sizeof(targetfile),"%s%s", cfg.lcd_output_path, "/oscam.lcd");
 		snprintf(temp_file, sizeof(temp_file), "%s%s.tmp", cfg.lcd_output_path, "/oscam.lcd");

@@ -68,7 +68,7 @@ cross-powerpc-405-linux:
 	$(MAKE) --no-print-directory \
 		CROSS=powerpc-405-linux-gnu- \
 		CONF_DIR=/var/tuxbox/config \
-		EXTRA_FLAGS="-DSTB04SCI=1"
+		EXTRA_FLAGS="-DSTB04SCI"
 		$(MAKEFLAGS)
 
 cross-sh4-linux:
@@ -235,7 +235,7 @@ dockstar:
 qboxhd:
 	$(MAKE) --no-print-directory \
 		CROSS=sh4-linux- \
-		EXTRA_FLAGS="-DQBOXHD=1" \
+		EXTRA_FLAGS=-DQBOXHD \
 		PLUS_TARGET=-qboxhd \
 		CONF_DIR=/var/tuxbox/config \
 		$(MAKEFLAGS)
@@ -266,16 +266,4 @@ static-ssl:
 		SSL_LIB=/usr/lib/libssl.a \
 		LIBCRYPTO_LIB=/usr/lib/libcrypto.a \
 		EXTRA_TARGET=-static \
-		$(MAKEFLAGS)
-
-android-arm:
-	$(MAKE) --no-print-directory \
-		LIB_PTHREAD= \
-		CROSS=arm-linux-androideabi- \
-		$(MAKEFLAGS)
-
-uclinux:
-	$(MAKE) --no-print-directory \
-		LIB_DL= STRIP=true \
-		CROSS=m68k-uclinux- \
 		$(MAKEFLAGS)

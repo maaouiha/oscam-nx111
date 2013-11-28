@@ -5,28 +5,13 @@
 #include "module-led.h"
 #include "oscam-chk.h"
 #include "oscam-client.h"
-#include "oscam-ecm.h"
-#include "oscam-emm.h"
 #include "oscam-net.h"
 #include "oscam-time.h"
-#include "oscam-work.h"
-#include "oscam-reader.h"
 #include "reader-common.h"
 #include "csctapi/atr.h"
 #include "csctapi/icc_async.h"
 
 extern struct s_cardsystem cardsystems[CS_MAX_MOD];
-extern char *RDR_CD_TXT[];
-
-int32_t check_sct_len(const uchar *data, int32_t off)
-{
-	int32_t len = SCT_LEN(data);
-	if (len + off > MAX_LEN) {
-		cs_debug_mask(D_TRACE | D_READER, "check_sct_len(): smartcard section too long %d > %d", len, MAX_LEN - off);
-		len = -1;
-	}
-	return len;
-}
 
 static void reader_nullcard(struct s_reader * reader)
 {
@@ -34,8 +19,9 @@ static void reader_nullcard(struct s_reader * reader)
   memset(reader->hexserial, 0   , sizeof(reader->hexserial));
   memset(reader->prid     , 0xFF, sizeof(reader->prid     ));
   reader->caid=0;
+  memset(reader->availkeys, 0   , sizeof(reader->availkeys));
+  reader->acs=0;
   reader->nprov=0;
-  cs_clear_entitlement(reader);
 }
 
 int32_t reader_cmd2icc(struct s_reader * reader, const uchar *buf, const int32_t l, uchar * cta_res, uint16_t * p_cta_lr)
@@ -103,6 +89,75 @@ static int32_t reader_activate_card(struct s_reader * reader, ATR * atr, uint16_
   return(1);
 }
 
+static void do_emm_from_file(struct s_reader * reader)
+{
+  //now here check whether we have EMM's on file to load and write to card:
+  if (reader->emmfile == NULL)
+     return;
+
+   //handling emmfile
+   char token[256];
+   FILE *fp;
+
+   if (reader->emmfile[0] == '/')
+      snprintf (token, sizeof(token), "%s", reader->emmfile); //pathname included
+   else
+      snprintf (token, sizeof(token), "%s%s", cs_confdir, reader->emmfile); //only file specified, look in confdir for this file
+
+   if (!(fp = fopen (token, "rb"))) {
+      rdr_log(reader, "ERROR: Cannot open EMM file '%s' (errno=%d %s)\n", token, errno, strerror(errno));
+      return;
+   }
+   EMM_PACKET *eptmp;
+   if (!cs_malloc(&eptmp, sizeof(EMM_PACKET))) {
+      fclose (fp);
+      return;
+   }
+
+   size_t ret = fread(eptmp, sizeof(EMM_PACKET), 1, fp);
+   if (ret < 1 && ferror(fp)) {
+        rdr_log(reader, "ERROR: Can't read EMM from file '%s' (errno=%d %s)", token, errno, strerror(errno));
+        free(eptmp);
+        fclose(fp);
+        return;
+   }
+   fclose (fp);
+
+   eptmp->caid[0] = (reader->caid >> 8) & 0xFF;
+   eptmp->caid[1] = reader->caid & 0xFF;
+   if (reader->nprov > 0)
+      memcpy(eptmp->provid, reader->prid[0], sizeof(eptmp->provid));
+   eptmp->emmlen = eptmp->emm[2] + 3;
+
+   struct s_cardsystem *cs = get_cardsystem_by_caid(reader->caid);
+   if (cs && cs->get_emm_type && !cs->get_emm_type(eptmp, reader)) {
+      rdr_debug_mask(reader, D_EMM, "emm skipped, get_emm_type() returns error");
+      free(eptmp);
+      return;
+   }
+   //save old b_nano value
+   //clear lsb and lsb+1, so no blocking, and no saving for this nano
+   uint16_t save_s_nano = reader->s_nano;
+   uint16_t save_b_nano = reader->b_nano;
+   uint32_t save_saveemm = reader->saveemm;
+
+   reader->s_nano = reader->b_nano = 0;
+   reader->saveemm = 0;
+
+   int32_t rc = cardreader_do_emm(reader, eptmp);
+   if (rc == OK)
+      rdr_log(reader, "EMM from file %s was successful written.", token);
+   else
+      rdr_log(reader, "ERROR: EMM read from file %s NOT processed correctly! (rc=%d)", token, rc);
+
+   //restore old block/save settings
+   reader->s_nano = save_s_nano;
+   reader->b_nano = save_b_nano;
+   reader->saveemm = save_saveemm;
+
+   free(eptmp);
+}
+
 void cardreader_get_card_info(struct s_reader *reader)
 {
 	if ((reader->card_status == CARD_NEED_INIT) || (reader->card_status == CARD_INSERTED)) {
@@ -121,16 +176,12 @@ static int32_t reader_get_cardsystem(struct s_reader * reader, ATR *atr)
 	int32_t i;
 	for (i=0; i<CS_MAX_MOD; i++) {
 		if (cardsystems[i].card_init) {
-			NULLFREE(reader->csystem_data);
 			if (cardsystems[i].card_init(reader, atr)) {
 				rdr_log(reader, "found card system %s", cardsystems[i].desc);
 				reader->csystem=cardsystems[i];
 				reader->csystem.active=1;
 				led_status_found_cardsystem();
 				break;
-			} else {
-				// On error free allocated card system data if any
-				NULLFREE(reader->csystem_data);
 			}
 		}
 	}
@@ -211,7 +262,6 @@ int32_t cardreader_do_checkhealth(struct s_reader * reader)
 		if (reader->card_status == CARD_INSERTED || reader->card_status == CARD_NEED_INIT) {
 			rdr_log(reader, "card ejected");
 			reader_nullcard(reader);
-			NULLFREE(reader->csystem_data);
 			if (cl) {
 				cl->lastemm = 0;
 				cl->lastecm = 0;
@@ -248,7 +298,7 @@ bool cardreader_init(struct s_reader *reader) {
 		int8_t i = 0;
 		do {
 			cs_sleepms(2000);
-			if (!ll_contains(configured_readers, reader) || !is_valid_client(client) || reader->enable != 1)
+			if (!ll_contains(configured_readers, reader) || !check_client(client) || reader->enable != 1)
 				return false;
 			i++;
 		} while (i < 30);

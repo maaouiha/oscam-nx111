@@ -1,7 +1,7 @@
 #include "globals.h"
 #ifdef MODULE_SERIAL
+#include <termios.h>
 #include "oscam-client.h"
-#include "oscam-ecm.h"
 #include "oscam-net.h"
 #include "oscam-string.h"
 #include "oscam-time.h"
@@ -79,13 +79,13 @@ struct s_serial_client
 	int32_t sssp_fix;
 };
 
-static pthread_mutex_t mutex;
-static pthread_cond_t cond;
-static int32_t bcopy_end = -1;
+pthread_mutex_t mutex;
+pthread_cond_t cond;
+int32_t bcopy_end = -1;
 
 struct s_thread_param
 {
-	uint8_t module_idx;
+	int32_t ctyp;
 	struct s_serial_client serialdata;
 };
 
@@ -119,18 +119,18 @@ static int32_t chk_ser_srvid(struct s_client *cl, uint16_t caid, uint16_t sid, u
   int32_t nr, rc=0;
   SIDTAB *sidtab;
 
-  if (!cl->sidtabs.ok)
+  if (!cl->sidtabok)
   {
-    if (!cl->sidtabs.no) return(1);
+    if (!cl->sidtabno) return(1);
     rc=1;
   }
   for (nr=0, sidtab=cfg.sidtab; sidtab; sidtab=sidtab->next, nr++)
     if (sidtab->num_caid | sidtab->num_provid | sidtab->num_srvid)
     {
-        if ((cl->sidtabs.no&((SIDTABBITS)1<<nr)) &&
+        if ((cl->sidtabno&((SIDTABBITS)1<<nr)) &&
           (chk_ser_srvid_match(caid, sid, provid, sidtab)))
         return(0);
-      if ((cl->sidtabs.ok&((SIDTABBITS)1<<nr)) &&
+      if ((cl->sidtabok&((SIDTABBITS)1<<nr)) &&
           (chk_ser_srvid_match(caid, sid, provid, sidtab)))
         rc=1;
     }
@@ -1016,13 +1016,12 @@ static void * oscam_ser_fork(void *pthreadparam)
   pthread_setspecific(getclient, cl);
   cl->thread=pthread_self();
   cl->typ='c';
-  cl->module_idx = pparam->module_idx;
+  cl->ctyp = pparam->ctyp;
   cl->account=first_client->account;
 
   if (!cl->serialdata && !cs_malloc(&cl->serialdata, sizeof(struct s_serial_client)))
     return NULL;
 
-  set_thread_name(__func__);
   oscam_init_serialdata(cl->serialdata);
   oscam_copy_serialdata(cl->serialdata, &pparam->serialdata);
   cs_log("serial: initialized (%s@%s)", cl->serialdata->oscam_ser_proto>P_MAX ?
@@ -1047,7 +1046,7 @@ static void * oscam_ser_fork(void *pthreadparam)
   return NULL;
 }
 
-void * init_oscam_ser(struct s_client *UNUSED(cl), uchar *UNUSED(mbuf), int32_t module_idx)
+void * init_oscam_ser(struct s_client *UNUSED(cl), uchar *UNUSED(mbuf), int32_t len)
 {
 	char sdevice[512];
 	int32_t ret;
@@ -1060,7 +1059,7 @@ void * init_oscam_ser(struct s_client *UNUSED(cl), uchar *UNUSED(mbuf), int32_t 
 		cs_strncpy(sdevice, cfg.ser_device, sizeof(sdevice));
 	else
 		memset(sdevice, 0, sizeof(sdevice));
-	param.module_idx = module_idx;
+	param.ctyp=len;
 	char *p;
 	pthread_t temp;
 	char cltype = 'c'; //now auto should work
@@ -1227,9 +1226,11 @@ void module_serial(struct s_module *ph)
   ph->type=MOD_CONN_SERIAL;
   ph->large_ecm_support = 1;
   ph->listenertype = LIS_SERIAL;
+  ph->multi=1;
   ph->s_handler=init_oscam_ser;
   ph->recv=oscam_ser_recv;
   ph->send_dcw=oscam_ser_send_dcw;
+  ph->c_multi=0;
   ph->c_init=oscam_ser_client_init;
   ph->c_recv_chk=oscam_ser_recv_chk;
   ph->c_send_ecm=oscam_ser_send_ecm;

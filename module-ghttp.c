@@ -3,7 +3,6 @@
 #include "oscam-client.h"
 #include "oscam-net.h"
 #include "oscam-string.h"
-#include "oscam-reader.h"
 
 typedef struct
 {
@@ -39,6 +38,43 @@ int32_t ghttp_client_init(struct s_client *cl)
   cs_debug_mask(D_CLIENT, "%s: last_s=%ld, last_g=%ld", cl->reader->label, cl->reader->last_s, cl->reader->last_g);
   
   return 0;
+}
+
+
+static inline unsigned char to_uchar (char ch)
+{
+  return ch;
+}
+
+void base64_encode(const char *in, size_t inlen, char *out, size_t outlen)
+{
+  static const char b64str[64] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  while (inlen && outlen) {
+    *out++ = b64str[(to_uchar (in[0]) >> 2) & 0x3f];
+    if (!--outlen) break;
+    *out++ = b64str[((to_uchar (in[0]) << 4) + (--inlen ? to_uchar (in[1]) >> 4 : 0)) & 0x3f];
+    if (!--outlen) break;
+    *out++ = (inlen ? b64str[((to_uchar (in[1]) << 2) + (--inlen ? to_uchar (in[2]) >> 6 : 0)) & 0x3f] : '=');
+    if (!--outlen) break;
+    *out++ = inlen ? b64str[to_uchar (in[2]) & 0x3f] : '=';
+    if (!--outlen) break;
+    if (inlen) inlen--;
+    if (inlen) in += 3;
+
+    if (outlen) *out = '\0';
+  }
+}
+
+size_t b64encode(const char *in, size_t inlen, char **out)
+{
+  size_t outlen = 1 + BASE64_LENGTH (inlen);
+  if (inlen > outlen) {
+    *out = NULL;
+    return 0;
+  }
+  if(!cs_malloc(out, outlen)) return -1;
+  base64_encode (in, inlen, *out, outlen);
+  return outlen - 1;
 }
 
 uint32_t javastring_hashcode(uchar* input, int32_t len)
@@ -258,13 +294,17 @@ static int32_t ghttp_send_ecm(struct s_client *client, ECM_REQUEST *er, uchar *U
 
 void module_ghttp(struct s_module *ph)
 {
-  ph->ptab.nports = 0;
-  // ph->ptab.ports[0].s_port = cfg.ghttp_port;
+  static PTAB ptab;
+  // ptab.ports[0].s_port = cfg.ghttp_port;
+  ph->ptab = &ptab;
+  ph->ptab->nports = 0;
 
   ph->desc = "ghttp";
   ph->type = MOD_CONN_TCP;
   // ph->listenertype = LIS_GHTTP;    
+  ph->multi = 0;
   ph->recv = ghttp_recv;
+  ph->c_multi = 0;
   ph->c_init = ghttp_client_init;
   ph->c_recv_chk = ghttp_recv_chk;
   ph->c_send_ecm = ghttp_send_ecm;
