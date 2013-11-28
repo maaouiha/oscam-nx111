@@ -1,31 +1,14 @@
+
 #include "globals.h"
-
-#include "csctapi/cardreaders.h"
-#include "modules.h"
-#include "readers.h"
-
-#include "extapi/coolapi.h"
-#include "module-anticasc.h"
-#include "module-cacheex.h"
+#include "csctapi/icc_async.h"
+#ifdef MODULE_CCCAM
 #include "module-cccam.h"
-#include "module-dvbapi-azbox.h"
-#include "module-dvbapi-mca.h"
-#include "module-ird-guess.h"
-#include "module-lcd.h"
-#include "module-led.h"
-#include "module-stat.h"
-#include "module-webif.h"
-#include "oscam-chk.h"
-#include "oscam-client.h"
-#include "oscam-failban.h"
-#include "oscam-files.h"
-#include "oscam-garbage.h"
-#include "oscam-lock.h"
-#include "oscam-net.h"
-#include "oscam-string.h"
-#include "oscam-time.h"
-#include "reader-common.h"
+#endif
+#if defined(WITH_AZBOX) && defined(HAVE_DVBAPI)
+#include "openxcas/openxcas_api.h"
+#endif
 
+static void cs_fake_client(struct s_client *client, char *usr, int32_t uniq, IN_ADDR_T ip);
 static void chk_dcw(struct s_client *cl, struct s_ecm_answer *ea);
 
 /*****************************************************************************
@@ -40,12 +23,11 @@ char *RDR_CD_TXT[] = {
 char *entitlement_type[] = {"", "package", "PPV-Event", "chid", "tier", "class", "PBM", "admin" };
 
 int32_t exit_oscam=0;
-struct s_module modules[CS_MAX_MOD];
-struct s_cardsystem cardsystems[CS_MAX_MOD];
-struct s_cardreader cardreaders[CS_MAX_MOD];
+struct s_module 	ph[CS_MAX_MOD]; // Protocols
+struct s_cardsystem	cardsystem[CS_MAX_MOD];
+struct s_cardreader	cardreader[CS_MAX_MOD];
 
 struct s_client * first_client = NULL; //Pointer to clients list, first client is master
-struct s_client * first_client_hashed[CS_CLIENT_HASHBUCKETS];  // Alternative hashed client list
 struct s_reader * first_active_reader = NULL; //list of active readers (enable=1 deleted = 0)
 LLIST * configured_readers = NULL; //list of all (configured) readers
 
@@ -53,26 +35,30 @@ uint16_t  len4caid[256];    // table for guessing caid (by len)
 char  cs_confdir[128]=CS_CONFDIR;
 uint16_t cs_dblevel=0;   // Debug Level
 int32_t thread_pipe[2] = {0, 0};
+#ifdef WEBIF
 int8_t cs_restart_mode=1; //Restartmode: 0=off, no restart fork, 1=(default)restart fork, restart by webif, 2=like=1, but also restart on segfaults
-uint8_t cs_http_use_utf8 = 1;
+uint8_t cs_http_use_utf8 = 0;
+#endif
 int8_t cs_capture_SEGV=0;
 int8_t cs_dump_stack=0;
 uint16_t cs_waittime = 60;
 char  cs_tmpdir[200]={0x00};
 pid_t server_pid=0;
+#if defined(WITH_LIBUSB)
+CS_MUTEX_LOCK sr_lock;
+#endif
+#if defined(__arm__)
+pthread_t	arm_led_thread = 0;
+LLIST		*arm_led_actions = NULL;
+#endif
 CS_MUTEX_LOCK system_lock;
-CS_MUTEX_LOCK config_lock;
 CS_MUTEX_LOCK gethostbyname_lock;
 CS_MUTEX_LOCK clientlist_lock;
 CS_MUTEX_LOCK readerlist_lock;
 CS_MUTEX_LOCK fakeuser_lock;
 CS_MUTEX_LOCK ecmcache_lock;
 CS_MUTEX_LOCK readdir_lock;
-CS_MUTEX_LOCK hitcache_lock;
 pthread_key_t getclient;
-static int32_t bg;
-static int32_t gbdb;
-static int32_t max_pending = 32;
 
 struct s_client *timecheck_client;
 
@@ -91,6 +77,155 @@ char    *loghist = NULL;     // ptr of log-history
 char    *loghistptr = NULL;
 #endif
 
+#define debug_ecm(mask, args...) \
+	do { \
+		if (config_WITH_DEBUG()) { \
+			char buf[ECM_FMT_LEN]; \
+			format_ecm(er, buf, ECM_FMT_LEN); \
+			cs_debug_mask(mask, ##args); \
+		} \
+	} while(0)
+
+#ifdef CS_CACHEEX
+int32_t cs_add_cacheex_stats(struct s_client *cl, uint16_t caid, uint16_t srvid, uint32_t prid, uint8_t direction) {
+
+	if (!cfg.cacheex_enable_stats)
+		return -1;
+
+	// create list if doesn't exist
+	if (!cl->ll_cacheex_stats)
+		cl->ll_cacheex_stats = ll_create("ll_cacheex_stats");
+
+	time_t now = time((time_t*)0);
+	LL_ITER itr = ll_iter_create(cl->ll_cacheex_stats);
+	S_CACHEEX_STAT_ENTRY *cacheex_stats_entry;
+
+	// check for existing entry
+	while ((cacheex_stats_entry = ll_iter_next(&itr))) {
+		if (cacheex_stats_entry->cache_srvid == srvid &&
+				cacheex_stats_entry->cache_caid == caid &&
+				cacheex_stats_entry->cache_prid == prid &&
+				cacheex_stats_entry->cache_direction == direction) {
+			// we already have this entry - just add count and time
+			cacheex_stats_entry->cache_count++;
+			cacheex_stats_entry->cache_last = now;
+			return cacheex_stats_entry->cache_count;
+		}
+	}
+
+	// if we land here we have to add a new entry
+	if(cs_malloc(&cacheex_stats_entry, sizeof(S_CACHEEX_STAT_ENTRY), -1)){
+		cacheex_stats_entry->cache_caid = caid;
+		cacheex_stats_entry->cache_srvid = srvid;
+		cacheex_stats_entry->cache_prid = prid;
+		cacheex_stats_entry->cache_count = 1;
+		cacheex_stats_entry->cache_last = now;
+		cacheex_stats_entry->cache_direction = direction;
+		ll_iter_insert(&itr, cacheex_stats_entry);
+		return 1;
+	}
+	return 0;
+}
+#endif
+
+int32_t cs_check_v(IN_ADDR_T ip, int32_t port, int32_t add, char *info) {
+	int32_t result = 0;
+	if (cfg.failbantime) {
+
+		if (!cfg.v_list)
+			cfg.v_list = ll_create("v_list");
+
+		time_t now = time((time_t*)0);
+		LL_ITER itr = ll_iter_create(cfg.v_list);
+		V_BAN *v_ban_entry;
+		int32_t ftime = cfg.failbantime*60;
+
+		//run over all banned entries to do housekeeping:
+		while ((v_ban_entry=ll_iter_next(&itr))) {
+
+			// housekeeping:
+			if ((now - v_ban_entry->v_time) >= ftime) { // entry out of time->remove
+				free(v_ban_entry->info);
+				ll_iter_remove_data(&itr);
+				continue;
+			}
+
+			if (IP_EQUAL(ip, v_ban_entry->v_ip) && port == v_ban_entry->v_port ) {
+				result=1;
+				if (!info) info = v_ban_entry->info;
+				else if (!v_ban_entry->info) {
+					int32_t size = strlen(info)+1;
+					v_ban_entry->info = cs_malloc(&v_ban_entry->info, size, -1);
+					strncpy(v_ban_entry->info, info, size);
+				}
+
+				if (!add) {
+					if (v_ban_entry->v_count >= cfg.failbancount) {
+						cs_debug_mask(D_TRACE, "failban: banned ip %s:%d - %ld seconds left%s%s",
+								cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port,
+								ftime - (now - v_ban_entry->v_time), info?", info: ":"", info?info:"");
+					} else {
+						cs_debug_mask(D_TRACE, "failban: ip %s:%d chance %d of %d%s%s",
+								cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port,
+								v_ban_entry->v_count, cfg.failbancount, info?", info: ":"", info?info:"");
+
+						v_ban_entry->v_count++;
+					}
+				}
+				else {
+					cs_debug_mask(D_TRACE, "failban: banned ip %s:%d - already exist in list%s%s",
+							cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port, info?", info: ":"", info?info:"");
+				}
+			}
+		}
+		if (add && !result) {
+			if(cs_malloc(&v_ban_entry, sizeof(V_BAN), -1)){
+				v_ban_entry->v_time = time((time_t *)0);
+				v_ban_entry->v_ip = ip;
+				v_ban_entry->v_port = port;
+				v_ban_entry->v_count = 1;
+				if (info) {
+					int32_t size = strlen(info)+1;
+					v_ban_entry->info = cs_malloc(&v_ban_entry->info, size, -1);
+					strncpy(v_ban_entry->info, info, size);
+				}
+
+				ll_iter_insert(&itr, v_ban_entry);
+
+				cs_debug_mask(D_TRACE, "failban: ban ip %s:%d with timestamp %ld%s%s",
+						cs_inet_ntoa(v_ban_entry->v_ip), v_ban_entry->v_port, v_ban_entry->v_time,
+						info?", info: ":"", info?info:"");
+			}
+		}
+	}
+	return result;
+}
+
+int32_t cs_check_violation(IN_ADDR_T ip, int32_t port) {
+        return cs_check_v(ip, port, 0, NULL);
+}
+void cs_add_violation_by_ip(IN_ADDR_T ip, int32_t port, char *info) {
+        cs_check_v(ip, port, 1, info);
+}
+
+void cs_add_violation(struct s_client *cl, char *info) {
+	cs_add_violation_by_ip(cl->ip, ph[cl->ctyp].ptab ? ph[cl->ctyp].ptab->ports[cl->port_idx].s_port : 0, info);
+}
+
+#ifdef WEBIF
+void cs_add_lastresponsetime(struct s_client *cl, int32_t ltime, time_t timestamp, int32_t rc){
+
+	if(cl->cwlastresptimes_last == CS_ECM_RINGBUFFER_MAX - 1){
+		cl->cwlastresptimes_last = 0;
+	} else {
+		cl->cwlastresptimes_last++;
+	}
+	cl->cwlastresptimes[cl->cwlastresptimes_last].duration = ltime > 9999 ? 9999 : ltime;
+	cl->cwlastresptimes[cl->cwlastresptimes_last].timestamp = timestamp;
+	cl->cwlastresptimes[cl->cwlastresptimes_last].rc = rc;
+}
+#endif
+
 /*****************************************************************************
         Statics
 *****************************************************************************/
@@ -101,7 +236,7 @@ char    *loghistptr = NULL;
 	} while(0)
 
 /* Prints usage information and information about the built-in modules. */
-static void show_usage(void)
+static void usage(void)
 {
 	printf("%s",
 "  ___  ____   ___\n"
@@ -110,14 +245,13 @@ static void show_usage(void)
 "| |_| |___) | |_| (_| | | | | | |\n"
 " \\___/|____/ \\___\\__,_|_| |_| |_|\n\n");
 	printf("OSCam cardserver v%s, build #%s (%s)\n", CS_VERSION, CS_SVN_VERSION, CS_TARGET);
-	printf("Copyright (C) 2009-2013 OSCam developers.\n");
+	printf("Copyright (C) 2009-2012 OSCam developers.\n");
 	printf("This program is distributed under GPLv3.\n");
 	printf("OSCam is based on Streamboard mp-cardserver v0.9d written by dukat\n");
-	printf("Visit http://www.streamboard.tv/oscam/ for more details.\n\n");
+	printf("Visit http://streamboard.de.vu/oscam/ for more details.\n\n");
 
-	printf(" Features   :");
+	printf(" Features  :");
 	_check(WEBIF, "webif");
-	_check(TOUCH, "touch");
 	_check(MODULE_MONITOR, "monitor");
 	_check(WITH_SSL, "ssl");
 	if (!config_WITH_STAPI())
@@ -127,12 +261,13 @@ static void show_usage(void)
 	_check(IRDETO_GUESSING, "irdeto-guessing");
 	_check(CS_ANTICASC, "anticascading");
 	_check(WITH_DEBUG, "debug");
+	_check(WITH_LIBUSB, "smartreader");
+	_check(WITH_PCSC, "pcsc");
 	_check(WITH_LB, "loadbalancing");
 	_check(LCDSUPPORT, "lcd");
-	_check(LEDSUPPORT, "led");
 	printf("\n");
 
-	printf(" Protocols  :");
+	printf(" Protocols :");
 	_check(MODULE_CAMD33, "camd33");
 	_check(MODULE_CAMD35, "camd35_udp");
 	_check(MODULE_CAMD35_TCP, "camd35_tcp");
@@ -140,7 +275,6 @@ static void show_usage(void)
 	_check(MODULE_CCCAM, "cccam");
 	_check(MODULE_CCCSHARE, "cccam_share");
 	_check(MODULE_PANDORA, "pandora");
-	_check(MODULE_GHTTP, "ghttp");
 	_check(CS_CACHEEX, "cache-exchange");
 	_check(MODULE_GBOX, "gbox");
 	_check(MODULE_RADEGAST, "radegast");
@@ -148,7 +282,7 @@ static void show_usage(void)
 	_check(MODULE_CONSTCW, "constcw");
 	printf("\n");
 
-	printf(" Readers    :");
+	printf(" Readers   :");
 	_check(READER_NAGRA, "nagra");
 	_check(READER_IRDETO, "irdeto");
 	_check(READER_CONAX, "conax");
@@ -162,226 +296,63 @@ static void show_usage(void)
 	_check(READER_BULCRYPT, "bulcrypt");
 	printf("\n");
 
-	printf(" CardReaders:");
-	_check(CARDREADER_PHOENIX, "phoenix");
-	_check(CARDREADER_INTERNAL_AZBOX, "internal_azbox");
-	_check(CARDREADER_INTERNAL_COOLAPI, "internal_coolapi");
-	_check(CARDREADER_INTERNAL_SCI, "internal_sci");
-	_check(CARDREADER_SC8IN1, "sc8in1");
-	_check(CARDREADER_MP35, "mp35");
-	_check(CARDREADER_SMARGO, "smargo");
-	_check(CARDREADER_PCSC, "pcsc");
-	_check(CARDREADER_SMART, "smartreader");
-	_check(CARDREADER_DB2COM, "db2com");
-	_check(CARDREADER_STAPI, "stapi");
 	printf("\n");
-	printf(" ConfigDir  : %s\n", CS_CONFDIR);
-
-	printf("\n");
-	printf(" Usage: oscam [-a] [-b] [-c <config dir>] [-d <level>] [-g <mode>] [-h]\n");
-	printf("              [-p <num>] [-S] [-s] [-t <tmp dir>] [-w <secs>] [-V]\n");
+	printf(" Usage: oscam [-a] [-b] [-c <config dir>] [-d <level>] [-g <mode>] [-h] [-p <num>] ");
 	if (config_WEBIF())
-		printf("              [-r <level>] [-u]\n");
+		printf("[-r <level>] ");
+	printf("[-S] [-s] [-t <tmp dir>] ");
+	if (config_WEBIF())
+		printf("[-u] ");
+	printf("[-w <secs>]\n");
 	printf("\n");
-	printf(" Options:\n");
-	printf("  -a         : Write oscam.crash file on segfault. This option needs GDB to\n");
-	printf("               be installed and OSCam executable to contain the debug\n");
-	printf("               information (run oscam-XXXX.debug binary).\n");
-	printf("  -b         : Start in the background as daemon.\n");
-	printf("  -c <dir>   : Read configuration files from <dir>:\n");
-	printf("  -d <level> : Set debug level mask used for logging:\n");
-	printf("                     0 = No debugging (default).\n");
-	printf("                     1 = Detailed error messages.\n");
-	printf("                     2 = ATR parsing info, ECM, EMM and CW dumps.\n");
-	printf("                     4 = Traffic from/to the reader.\n");
-	printf("                     8 = Traffic from/to the clients.\n");
-	printf("                    16 = Traffic to the reader-device on IFD layer.\n");
-	printf("                    32 = Traffic to the reader-device on I/O layer.\n");
-	printf("                    64 = EMM logging.\n");
-	printf("                   128 = DVBAPI logging.\n");
-	printf("                   256 = Loadbalancer logging.\n");
-	printf("                   512 = CACHEEX logging.\n");
-	printf("                  1024 = Client ECM logging.\n");
-	printf("                 65535 = Debug all.\n");
-	printf("  -g <mode>  : Garbage collector debug mode (DEBUG ONLY OPTION!):\n");
-	printf("                 1 = Immediate free.\n");
-	printf("                 2 = Check for double frees.\n");
-	printf("  -p <num>   : Maximum number of pending ECM packets. Default: 32 Max: 255\n");
+	printf("\t-a         : write oscam.crash on segfault (needs installed GDB and OSCam compiled with debug infos -ggdb)\n\n");
+	printf("\t-b         : start in background\n\n");
+	printf("\t-c <dir>   : read configuration from <dir>\n");
+	printf("\t             default = %s\n\n", CS_CONFDIR);
+	printf("\t-d <level> : debug level mask\n");
+	printf("\t                   0 = no debugging (default)\n");
+	printf("\t                   1 = detailed error messages\n");
+	printf("\t                   2 = ATR parsing info, ECM, EMM and CW dumps\n");
+	printf("\t                   4 = traffic from/to the reader\n");
+	printf("\t                   8 = traffic from/to the clients\n");
+	printf("\t                  16 = traffic to the reader-device on IFD layer\n");
+	printf("\t                  32 = traffic to the reader-device on I/O layer\n");
+	printf("\t                  64 = EMM logging\n");
+	printf("\t                 128 = DVBAPI logging\n");
+	printf("\t                 256 = Loadbalancer logging\n");
+	printf("\t                 512 = CACHEEX logging\n");
+	printf("\t                1024 = Client ECM logging\n");
+	printf("\t               65535 = Debug all\n\n");
+	printf("\t-g <mode>  : garbage collector debug mode (1=immediate free, 2=check for double frees), these options are intended for debug only!\n\n");
+	printf("\t-h         : show this help\n\n");
+	printf("\t-p <num>   : maximum number of pending ECM packets, default:32, maximum:255\n\n");
 	if (config_WEBIF()) {
-		printf("  -r <level> : Set restart level:\n");
-		printf("                 0 = Restart disabled (request sets exit status 99).\n");
-		printf("                 1 = Restart activated (webif can restart oscam (default)).\n");
-		printf("                 2 = Like 1, but also restart on segmentation faults.\n");
-	    printf("  -u         : Enable output of web interface in UTF-8 charset.\n");
+		printf("\t-r <level> : restart level\n");
+		printf("\t               0 = disabled, restart request sets exit status 99\n");
+		printf("\t               1 = restart activated, web interface can restart oscam (default)\n");
+		printf("\t               2 = like 1, but also restart on segmentation faults\n\n");
 	}
-	printf("  -S         : Do not filter sensitive info (card serials, boxids) in logs.\n");
-	printf("  -s         : Capture segmentation faults.\n");
-	printf("  -t <dir>   : Set temporary directory to <dir>:\n");
+	printf("\t-S         : do not filter sensitive info (card serial numbers) from the logs\n\n");
+	printf("\t-s         : capture segmentation faults\n\n");
+	printf("\t-t <dir>   : tmp dir <dir>\n");
 #if defined(__CYGWIN__)
-	printf("                 Default = (OS-TMP)\n");
+	printf("\t             default = (OS-TMP)\n\n");
 #else
-	printf("                 Default = /tmp/.oscam\n");
+	printf("\t             default = /tmp/.oscam\n\n");
 #endif
-	printf("  -w <secs>  : Wait <secs> seconds for the system time to be set correctly.\n");
-	printf("  -h         : Show this help text.\n");
-	printf("  -V         : Show OSCam binary configuration and version.\n");
+	if (config_WEBIF())
+	    printf("\t-u         : enable output of web interface in UTF-8 charset\n\n");
+	printf("\t-w <secs>  : wait up to <secs> seconds for the system time to be set correctly, default:60\n\n");
 }
 #undef _check
 
-static void write_versionfile(bool use_stdout);
-
-static void parse_cmdline_params(int argc, char **argv) {
-	int i;
-	while ((i = getopt(argc, argv, "g:bsauc:t:d:r:w:p:SVh")) != EOF) {
-		switch(i) {
-		case 'g': gbdb = atoi(optarg); break;
-		case 'b': bg = 1; break;
-		case 's': cs_capture_SEGV = 1; break;
-		case 'a': cs_dump_stack = 1; break;
-		case 'c': cs_strncpy(cs_confdir, optarg, sizeof(cs_confdir)); break;
-		case 'd': cs_dblevel = atoi(optarg); break;
-		case 'r':
-			if (config_WEBIF()) {
-				cs_restart_mode = atoi(optarg);
-			}
-			break;
-		case 'u':
-			if (config_WEBIF()) {
-				cs_http_use_utf8 = 1;
-				printf("WARNING: Web interface UTF-8 mode enabled. Carefully read documentation as bugs may arise.\n");
-			}
-			break;
-		case 't': {
-			mkdir(optarg, S_IRWXU);
-			int j = open(optarg, O_RDONLY);
-			if (j >= 0) {
-				close(j);
-				cs_strncpy(cs_tmpdir, optarg, sizeof(cs_tmpdir));
-			} else {
-				printf("WARNING: tmpdir does not exist. using default value.\n");
-			}
-			break;
-		}
-		case 'w': cs_waittime = strtoul(optarg, NULL, 10); break;
-		case 'p': max_pending = atoi(optarg)<=0?32:MIN(atoi(optarg), 255); break;
-		case 'S': log_remove_sensitive = !log_remove_sensitive; break;
-		case 'V':
-			write_versionfile(true);
-			exit(0);
-		case 'h':
-		default :
-			show_usage();
-			exit(0);
-		}
-	}
-}
-
-#define write_conf(CONFIG_VAR, text) \
-	fprintf(fp, "%-30s %s\n", text ":", config_##CONFIG_VAR() ? "yes" : "no")
-
-#define write_readerconf(CONFIG_VAR, text) \
-	fprintf(fp, "%-30s %s\n", text ":", config_##CONFIG_VAR() ? "yes" : "no - no EMM support!")
-
-#define write_cardreaderconf(CONFIG_VAR, text) \
-	fprintf(fp, "%s%-19s %s\n", "cardreader_", text ":", config_##CONFIG_VAR() ? "yes" : "no")
-
-static void write_versionfile(bool use_stdout) {
-	FILE *fp = stdout;
-	if (!use_stdout) {
-		char targetfile[256];
-		snprintf(targetfile, sizeof(targetfile) - 1, "%s%s", get_tmp_dir(), "/oscam.version");
-		targetfile[sizeof(targetfile) - 1] = 0;
-		fp = fopen(targetfile, "w");
-		if (!fp) {
-			cs_log("Cannot open %s (errno=%d %s)", targetfile, errno, strerror(errno));
-			return;
-		}
-		struct tm st;
-		time_t now = time(NULL);
-		localtime_r(&now, &st);
-
-		fprintf(fp, "Unix starttime: %ld\n", (long)now);
-		fprintf(fp, "Starttime:      %02d.%02d.%04d %02d:%02d:%02d\n",
-			st.tm_mday, st.tm_mon + 1, st.tm_year + 1900,
-			st.tm_hour, st.tm_min, st.tm_sec);
-	}
-
-	fprintf(fp, "Version:        oscam-%s-r%s\n", CS_VERSION, CS_SVN_VERSION);
-
-	fprintf(fp, "\n");
-	write_conf(WEBIF, "Web interface support");
-	write_conf(TOUCH, "Touch interface support");
-	write_conf(WITH_SSL, "SSL support");
-	write_conf(HAVE_DVBAPI, "DVB API support");
-	if (config_HAVE_DVBAPI()) {
-		write_conf(WITH_AZBOX, "DVB API with AZBOX support");
-		write_conf(WITH_MCA, "DVB API with MCA support");
-		write_conf(WITH_COOLAPI, "DVB API with COOLAPI support");
-		write_conf(WITH_STAPI, "DVB API with STAPI support");
-	}
-	write_conf(CS_ANTICASC, "Anti-cascading support");
-	write_conf(IRDETO_GUESSING, "Irdeto guessing");
-	write_conf(WITH_DEBUG, "Debug mode");
-	write_conf(MODULE_MONITOR, "Monitor");
-	write_conf(WITH_LB, "Loadbalancing support");
-	write_conf(LCDSUPPORT, "LCD support");
-	write_conf(LEDSUPPORT, "LED support");
-	write_conf(IPV6SUPPORT, "IPv6 support");
-	write_conf(CS_CACHEEX, "Cache exchange support");
-
-	fprintf(fp, "\n");
-	write_conf(MODULE_CAMD33, "camd 3.3x");
-	write_conf(MODULE_CAMD35, "camd 3.5 UDP");
-	write_conf(MODULE_CAMD35_TCP, "camd 3.5 TCP");
-	write_conf(MODULE_NEWCAMD, "newcamd");
-	write_conf(MODULE_CCCAM, "CCcam");
-	write_conf(MODULE_CCCSHARE, "CCcam share");
-	write_conf(MODULE_PANDORA, "Pandora");
-	write_conf(MODULE_GHTTP, "ghttp");
-	write_conf(MODULE_GBOX, "gbox");
-	write_conf(MODULE_RADEGAST, "radegast");
-	write_conf(MODULE_SERIAL, "serial");
-	write_conf(MODULE_CONSTCW, "constant CW");
-
-	fprintf(fp, "\n");
-	write_conf(WITH_CARDREADER, "Reader support");
-	if (config_WITH_CARDREADER()) {
-		fprintf(fp, "\n");
-		write_readerconf(READER_NAGRA, "Nagra");
-		write_readerconf(READER_IRDETO, "Irdeto");
-		write_readerconf(READER_CONAX, "Conax");
-		write_readerconf(READER_CRYPTOWORKS, "Cryptoworks");
-		write_readerconf(READER_SECA, "Seca");
-		write_readerconf(READER_VIACCESS, "Viaccess");
-		write_readerconf(READER_VIDEOGUARD, "NDS Videoguard");
-		write_readerconf(READER_DRE, "DRE Crypt");
-		write_readerconf(READER_TONGFANG, "TONGFANG");
-		write_readerconf(READER_BULCRYPT, "Bulcrypt");
-		fprintf(fp, "\n");
-		write_cardreaderconf(CARDREADER_PHOENIX, "phoenix");
-		write_cardreaderconf(CARDREADER_INTERNAL_AZBOX, "internal_azbox");
-		write_cardreaderconf(CARDREADER_INTERNAL_COOLAPI, "internal_coolapi");
-		write_cardreaderconf(CARDREADER_INTERNAL_SCI, "internal_sci");
-		write_cardreaderconf(CARDREADER_SC8IN1, "sc8in1");
-		write_cardreaderconf(CARDREADER_MP35, "mp35");
-		write_cardreaderconf(CARDREADER_SMARGO, "smargo");
-		write_cardreaderconf(CARDREADER_PCSC, "pcsc");
-		write_cardreaderconf(CARDREADER_SMART, "smartreader");
-		write_cardreaderconf(CARDREADER_DB2COM, "db2com");
-		write_cardreaderconf(CARDREADER_STAPI, "stapi");
-	} else {
-		write_readerconf(WITH_CARDREADER, "Reader Support");
-	}
-	if (!use_stdout)
-		fclose(fp);
-}
-#undef write_conf
-#undef write_readerconf
-#undef write_cardreaderconf
-
 #ifdef NEED_DAEMON
-// The compat function is not called daemon() because this may cause problems.
-static int32_t do_daemon(int32_t nochdir, int32_t noclose)
+#if defined(__APPLE__)
+// this is done because daemon is being deprecated starting with 10.5 and -Werror will always trigger an error
+static int32_t daemon_compat(int32_t nochdir, int32_t noclose)
+#else
+static int32_t daemon(int32_t nochdir, int32_t noclose)
+#endif
 {
   int32_t fd;
 
@@ -408,8 +379,6 @@ static int32_t do_daemon(int32_t nochdir, int32_t noclose)
   }
   return(0);
 }
-#else
-#define do_daemon daemon
 #endif
 
 int32_t recv_from_udpipe(uchar *buf)
@@ -427,6 +396,39 @@ int32_t recv_from_udpipe(uchar *buf)
   return n;
 }
 
+/* Returns the username from the client. You will always get a char reference back (no NULLs but it may be string containting "NULL")
+   which you should never modify and not free()! */
+char *username(struct s_client * client)
+{
+	if (!client)
+		return "NULL";
+
+	if (client->typ == 's' || client->typ == 'h' || client->typ == 'a')
+	{
+		return processUsername?processUsername:"NULL";
+	}
+
+	if (client->typ == 'c' || client->typ == 'm') {
+		struct s_auth *acc = client->account;
+		if(acc)
+		{
+			if (acc->usr[0])
+				return acc->usr;
+			else
+				return "anonymous";
+		}
+		else
+		{
+			return "NULL";
+		}
+	} else if (client->typ == 'r' || client->typ == 'p'){
+		struct s_reader *rdr = client->reader;
+		if(rdr)
+			return rdr->label;
+	}
+	return "NULL";
+}
+
 static struct s_client * idx_from_ip(IN_ADDR_T ip, in_port_t port)
 {
   struct s_client *cl;
@@ -434,6 +436,16 @@ static struct s_client * idx_from_ip(IN_ADDR_T ip, in_port_t port)
     if (!cl->kill && (IP_EQUAL(cl->ip, ip)) && (cl->port==port) && ((cl->typ=='c') || (cl->typ=='m')))
       return cl;
   return NULL;
+}
+
+static int32_t chk_caid(uint16_t caid, CAIDTAB *ctab)
+{
+  int32_t n;
+  int32_t rc;
+  for (rc=(-1), n=0; (n<CS_MAXCAIDTAB) && (rc<0); n++)
+    if ((caid & ctab->mask[n]) == ctab->caid[n])
+      rc=ctab->cmap[n] ? ctab->cmap[n] : caid;
+  return(rc);
 }
 
 int32_t chk_bcaid(ECM_REQUEST *er, CAIDTAB *ctab)
@@ -445,12 +457,56 @@ int32_t chk_bcaid(ECM_REQUEST *er, CAIDTAB *ctab)
   return(1);
 }
 
+#ifdef WEBIF
+void clear_account_stats(struct s_auth *account)
+{
+  account->cwfound = 0;
+  account->cwcache = 0;
+  account->cwnot = 0;
+  account->cwtun = 0;
+  account->cwignored  = 0;
+  account->cwtout = 0;
+  account->emmok = 0;
+  account->emmnok = 0;
+#ifdef CS_CACHEEX
+  account->cwcacheexgot = 0;
+  account->cwcacheexpush = 0;
+  account->cwcacheexhit = 0;
+#endif
+}
+
+void clear_all_account_stats(void)
+{
+  struct s_auth *account = cfg.account;
+  while (account) {
+    clear_account_stats(account);
+    account = account->next;
+  }
+}
+
+void clear_system_stats(void)
+{
+  first_client->cwfound = 0;
+  first_client->cwcache = 0;
+  first_client->cwnot = 0;
+  first_client->cwtun = 0;
+  first_client->cwignored  = 0;
+  first_client->cwtout = 0;
+  first_client->emmok = 0;
+  first_client->emmnok = 0;
+#ifdef CS_CACHEEX
+  first_client->cwcacheexgot = 0;
+  first_client->cwcacheexpush = 0;
+  first_client->cwcacheexhit = 0;
+#endif
+}
+#endif
+
 void cs_accounts_chk(void)
 {
-	struct s_auth *account1,*account2;
+  struct s_auth *old_accounts = cfg.account;
   struct s_auth *new_accounts = init_userdb();
-  cs_writelock(&config_lock);
-  struct s_auth *old_accounts = cfg.account;  
+  struct s_auth *account1,*account2;
   for (account1=cfg.account; account1; account1=account1->next) {
     for (account2=new_accounts; account2; account2=account2->next) {
       if (!strcmp(account1->usr, account2->usr)) {
@@ -463,50 +519,53 @@ void cs_accounts_chk(void)
         account2->emmok = account1->emmok;
         account2->emmnok = account1->emmnok;
         account2->firstlogin = account1->firstlogin;
-        ac_copy_vars(account1, account2);
+#ifdef CS_ANTICASC
+		account2->ac_users = account1->ac_users;
+		account2->ac_penalty = account1->ac_penalty;
+		account2->ac_stat = account1->ac_stat;
+#endif
       }
     }
   }
   cs_reinit_clients(new_accounts);
   cfg.account = new_accounts;
   init_free_userdb(old_accounts);
+
+#ifdef CS_ANTICASC
   ac_clear();
-  cs_writeunlock(&config_lock);
+#endif
 }
 
 static void remove_ecm_from_reader(ECM_REQUEST *ecm) {
-	int32_t i;
+	struct s_ecm_answer *ea;
+	struct s_reader *rdr;
+	ECM_REQUEST *er;
+	int i;
 
-	struct s_ecm_answer *ea = ecm->matching_rdr;
+	ea = ecm->matching_rdr;
 	while (ea) {
 	    if ((ea->status & REQUEST_SENT) && !(ea->status & REQUEST_ANSWERED)) {
-	      //we found a outstanding reader, clean it:
-        struct s_reader *rdr = ea->reader;
-        if (rdr){
-        	struct s_client *cl = rdr->client;
-        	if(cl) {
-        		ECM_REQUEST *ecmtask = cl->ecmtask;
-        		if(ecmtask){
-	            for (i = 0; i < cfg.max_pending; ++i) {
-	            	if (ecmtask[i].parent == ecm) {
-	            		ecmtask[i].parent = NULL;
-	            		ecmtask[i].client = NULL;
-	            		cacheex_set_csp_lastnode(&ecmtask[i]);
+	        //we found a outstanding reader, clean it:
+            rdr = ea->reader;
+            if (rdr && rdr->client && rdr->client->ecmtask) {
+	            for (i = 0; i < cfg.max_pending; i++) {
+	            	er = &rdr->client->ecmtask[i];
+	            	if (er->parent == ecm) {
+	            		er->parent = NULL;
+	            		er->client = NULL;
+#ifdef CS_CACHEEX
+	            		er->csp_lastnodes = NULL;
+#endif
 	            	}
 	            }
-	          }
-          }
-        }
+            }
 	    }
 	    ea = ea->next;
 	}
 
 }
-
-void free_ecm(ECM_REQUEST *ecm) {
+static void free_ecm(ECM_REQUEST *ecm) {
 	struct s_ecm_answer *ea, *nxt;
-
-	cacheex_free_csp_lastnodes(ecm);
 
 	//remove this ecm from reader queue to avoid segfault on very late answers (when ecm is already disposed)
 	//first check for outstanding answers:
@@ -520,6 +579,10 @@ void free_ecm(ECM_REQUEST *ecm) {
 		add_garbage(ea);
 		ea = nxt;
 	}
+#ifdef CS_CACHEEX
+	ll_destroy_data(ecm->csp_lastnodes);
+	ecm->csp_lastnodes = NULL;
+#endif
 	add_garbage(ecm);
 }
 
@@ -530,9 +593,8 @@ void free_ecm(ECM_REQUEST *ecm) {
 static void free_data(struct s_data *data)
 {
     if (data) {
-        if (data->len && data->ptr) {
+        if (data->len && data->ptr)
             free(data->ptr);
-        }
 	free(data);
     }
 }
@@ -561,24 +623,25 @@ static void cleanup_ecmtasks(struct s_client *cl)
 	//remove this clients ecm from queue. because of cache, just null the client:
 	cs_readlock(&ecmcache_lock);
 	for (ecm = ecmcwcache; ecm; ecm = ecm->next) {
-		if (ecm->client == cl) {
+		if (ecm->client == cl)
 			ecm->client = NULL;
-			cacheex_set_cacheex_src(ecm, cl);
-			//if cl is a reader, remove from matching_rdr:
-			for(ea_list = ecm->matching_rdr, ea_prev=NULL; ea_list; ea_prev = ea_list, ea_list = ea_list->next) {
-				if (ea_list->reader->client == cl) {
-					if (ea_prev)
-						ea_prev->next = ea_list->next;
-					else
-						ecm->matching_rdr = ea_list->next;
-					add_garbage(ea_list);
-				}
+#ifdef CS_CACHEEX
+		if (ecm->cacheex_src == cl)
+			ecm->cacheex_src = NULL;
+#endif
+		//if cl is a reader, remove from matching_rdr:
+		for(ea_list = ecm->matching_rdr, ea_prev=NULL; ea_list; ea_prev = ea_list, ea_list = ea_list->next) {
+			if (ea_list->reader->client == cl) {
+				if (ea_prev)
+					ea_prev->next = ea_list->next;
+				else
+					ecm->matching_rdr = ea_list->next;
+				add_garbage(ea_list);
 			}
-
-			//if cl is a client, remove ecm from reader queue:
-		
-			remove_ecm_from_reader(ecm);
 		}
+
+		//if cl is a client, remove ecm from reader queue:
+		remove_ecm_from_reader(ecm);
 	}
 	cs_readunlock(&ecmcache_lock);
 
@@ -587,13 +650,14 @@ static void cleanup_ecmtasks(struct s_client *cl)
 	struct s_reader *rdr = first_active_reader;
 	while (rdr) {
 		if (rdr->client && rdr->client->ecmtask) {
+			ECM_REQUEST *ecm;
 			int i;
 			for (i = 0; i < cfg.max_pending; i++) {
 				ecm = &rdr->client->ecmtask[i];
 				if (ecm->client == cl) {
 					ecm->client = NULL;
 					ecm->parent = NULL;
-				}
+                                }
 			}
 		}
 		rdr=rdr->next;
@@ -639,17 +703,6 @@ void cleanup_thread(void *var)
 			break;
 	if (cl == cl2)
 		prev->next = cl2->next; //remove client from list
-	int32_t bucket = (uintptr_t)cl/16 % CS_CLIENT_HASHBUCKETS;
-	//remove client from hashed list
-	if(first_client_hashed[bucket] == cl){
-		first_client_hashed[bucket] = cl->nexthashed;
-	} else {
-		for (prev=first_client_hashed[bucket], cl2=first_client_hashed[bucket]->nexthashed; prev->nexthashed != NULL; prev=prev->nexthashed, cl2=cl2->nexthashed)
-			if (cl == cl2)
-				break;
-		if (cl == cl2)
-			prev->nexthashed = cl2->nexthashed;
-	}
 	cs_writeunlock(&clientlist_lock);
 
 	// Clean reader. The cleaned structures should be only used by the reader thread, so we should be save without waiting
@@ -659,8 +712,10 @@ void cleanup_thread(void *var)
 		remove_reader_from_active(rdr);
 		if(rdr->ph.cleanup)
 			rdr->ph.cleanup(cl);
+#ifdef WITH_CARDREADER
 		if (cl->typ == 'r')
-			cardreader_close(rdr);
+			ICC_Async_Close(rdr);
+#endif
 		if (cl->typ == 'p')
 			network_tcp_connection_close(rdr, "cleanup");
 		cl->reader = NULL;
@@ -675,8 +730,8 @@ void cleanup_thread(void *var)
 
 		cs_sleepms(500); //just wait a bit that really really nobody is accessing client data
 
-		if(modules[cl->ctyp].cleanup)
-			modules[cl->ctyp].cleanup(cl);
+		if(ph[cl->ctyp].cleanup)
+			ph[cl->ctyp].cleanup(cl);
 	}
 
 	// Close network socket if not already cleaned by previous cleanup functions
@@ -711,14 +766,32 @@ void cleanup_thread(void *var)
 
 static void cs_cleanup(void)
 {
-	stat_finish();
+#ifdef WITH_LB
+	if (cfg.lb_mode && cfg.lb_save) {
+		save_stat_to_file(0);
+		if (cfg.lb_savepath)
+		    cs_log("stats saved to file %s", cfg.lb_savepath);
+		cfg.lb_save = 0; //this is for avoiding duplicate saves
+	}
+#endif
 
-	cccam_done_share();
+#ifdef MODULE_CCCAM
+#ifdef MODULE_CCCSHARE
+	done_share();
+#endif
+#endif
 
-	kill_all_clients();
+	//cleanup clients:
+	struct s_client *cl;
+	for (cl=first_client->next; cl; cl=cl->next) {
+		if (cl->typ=='c'){
+			if(cl->account && cl->account->usr)
+				cs_log("killing client %s", cl->account->usr);
+			kill_thread(cl);
+		}
+	}
 
 	//cleanup readers:
-	struct s_client *cl;
 	struct s_reader *rdr;
 	for (rdr=first_active_reader; rdr ; rdr=rdr->next) {
 		cl = rdr->client;
@@ -728,7 +801,7 @@ static void cs_cleanup(void)
 			// Stop MCR reader display thread
 			if (cl->typ == 'r' && cl->reader && cl->reader->typ == R_SC8in1
 					&& cl->reader->sc8in1_config && cl->reader->sc8in1_config->display_running) {
-				cl->reader->sc8in1_config->display_running = 0;
+				cl->reader->sc8in1_config->display_running = FALSE;
 			}
 		}
 	}
@@ -737,11 +810,6 @@ static void cs_cleanup(void)
 	init_free_userdb(cfg.account);
 	cfg.account = NULL;
 	init_free_sidtab();
-
-	if (cfg.pidfile)
-		unlink(cfg.pidfile);
-
-	config_free();
 
 	cs_close_log();
 }
@@ -866,7 +934,9 @@ void cs_reload_config(void)
 		cs_accounts_chk();
 		init_srvid();
 		init_tierid();
+		#ifdef CS_ANTICASC
 		ac_init_stat();
+		#endif
 }
 
 /* Sets signal handlers to ignore for early startup of OSCam because for example log
@@ -880,7 +950,7 @@ static void init_signal_pre(void)
 }
 
 /* Sets the signal handlers.*/
-static void init_signal(int8_t isDaemon)
+static void init_signal(void)
 {
 		set_signal_handler(SIGINT, 3, cs_exit);
 		//set_signal_handler(SIGKILL, 3, cs_exit);
@@ -899,30 +969,29 @@ static void init_signal(int8_t isDaemon)
 		//  set_signal_handler(SIGALRM , 0, cs_alarm);
 		set_signal_handler(SIGALRM , 0, cs_master_alarm);
 		// set_signal_handler(SIGCHLD , 1, cs_child_chk);
-		set_signal_handler(SIGHUP  , 1, isDaemon?cs_dummy:cs_reload_config);
+		set_signal_handler(SIGHUP  , 1, cs_reload_config);
 		//set_signal_handler(SIGHUP , 1, cs_sighup);
-		set_signal_handler(SIGUSR1, 1, isDaemon?cs_dummy:cs_debug_level);
-		set_signal_handler(SIGUSR2, 1, isDaemon?cs_dummy:cs_card_info);
-		set_signal_handler(OSCAM_SIGNAL_WAKEUP, 0, isDaemon?cs_dummy:cs_dummy);
+		set_signal_handler(SIGUSR1, 1, cs_debug_level);
+		set_signal_handler(SIGUSR2, 1, cs_card_info);
+		set_signal_handler(OSCAM_SIGNAL_WAKEUP, 0, cs_dummy);
 
-		if(!isDaemon){
-			if (cs_capture_SEGV) {
-				set_signal_handler(SIGSEGV, 1, cs_exit);
-				set_signal_handler(SIGBUS, 1, cs_exit);
-			}
-			else if (cs_dump_stack) {
-				set_signal_handler(SIGSEGV, 1, cs_dumpstack);
-				set_signal_handler(SIGBUS, 1, cs_dumpstack);
-			}
-
-			cs_log("signal handling initialized (type=%s)",
-#ifdef CS_SIGBSD
-			"bsd"
-#else
-			"sysv"
-#endif
-			);
+		if (cs_capture_SEGV) {
+			set_signal_handler(SIGSEGV, 1, cs_exit);
+			set_signal_handler(SIGBUS, 1, cs_exit);
 		}
+		else if (cs_dump_stack) {
+			set_signal_handler(SIGSEGV, 1, cs_dumpstack);
+			set_signal_handler(SIGBUS, 1, cs_dumpstack);
+		}
+
+
+		cs_log("signal handling initialized (type=%s)",
+#ifdef CS_SIGBSD
+		"bsd"
+#else
+		"sysv"
+#endif
+		);
 	return;
 }
 
@@ -947,10 +1016,27 @@ void cs_exit(int32_t sig)
   if (!cl)
   	return;
 
-	if (cl->typ == 'h' || cl->typ == 's') {
-		led_status_stopping();
-		led_stop();
-		lcd_thread_stop();
+  if(cl->typ == 'h' || cl->typ == 's'){
+#if defined(__arm__)
+		if(cfg.enableled == 1){
+			cs_switch_led(LED1B, LED_OFF);
+			cs_switch_led(LED2, LED_OFF);
+			cs_switch_led(LED3, LED_OFF);
+			cs_switch_led(LED1A, LED_ON);
+		}
+		arm_led_stop_thread();
+#endif
+#ifdef QBOXHD
+		if(cfg.enableled == 2){
+	    qboxhd_led_blink(QBOXHD_LED_COLOR_YELLOW,QBOXHD_LED_BLINK_FAST);
+	    qboxhd_led_blink(QBOXHD_LED_COLOR_RED,QBOXHD_LED_BLINK_FAST);
+	    qboxhd_led_blink(QBOXHD_LED_COLOR_GREEN,QBOXHD_LED_BLINK_FAST);
+	    qboxhd_led_blink(QBOXHD_LED_COLOR_BLUE,QBOXHD_LED_BLINK_FAST);
+	    qboxhd_led_blink(QBOXHD_LED_COLOR_MAGENTA,QBOXHD_LED_BLINK_FAST);
+	  }
+#endif
+
+	end_lcd_thread();
 
 #if !defined(__CYGWIN__)
 	char targetfile[256];
@@ -991,6 +1077,166 @@ void cs_exit(int32_t sig)
 	  exit_oscam = sig?sig:1;
 }
 
+void cs_reinit_clients(struct s_auth *new_accounts)
+{
+	struct s_auth *account;
+	unsigned char md5tmp[MD5_DIGEST_LENGTH];
+
+	struct s_client *cl;
+	for (cl=first_client->next; cl ; cl=cl->next)
+		if( (cl->typ == 'c' || cl->typ == 'm') && cl->account ) {
+			for (account = new_accounts; (account) ; account = account->next)
+				if (!strcmp(cl->account->usr, account->usr))
+					break;
+
+			if (account && !account->disabled && cl->pcrc == crc32(0L, MD5((uchar *)account->pwd, strlen(account->pwd), md5tmp), MD5_DIGEST_LENGTH)) {
+				cl->account = account;
+				if(cl->typ == 'c'){
+					cl->grp	= account->grp;
+					cl->aureader_list	= account->aureader_list;
+					cl->autoau = account->autoau;
+					cl->expirationdate = account->expirationdate;
+					cl->allowedtimeframe[0] = account->allowedtimeframe[0];
+					cl->allowedtimeframe[1] = account->allowedtimeframe[1];
+					cl->ncd_keepalive = account->ncd_keepalive;
+					cl->c35_suppresscmd08 = account->c35_suppresscmd08;
+					cl->tosleep	= (60*account->tosleep);
+					cl->c35_sleepsend = account->c35_sleepsend;
+					cl->monlvl = account->monlvl;
+					cl->disabled	= account->disabled;
+					cl->fchid	= account->fchid;  // CHID filters
+					cl->cltab	= account->cltab;  // Class
+					// newcamd module doesn't like ident reloading
+					if(!cl->ncd_server)
+						cl->ftab = account->ftab;   // Ident
+
+					cl->sidtabok = account->sidtabok;   // services
+					cl->sidtabno = account->sidtabno;   // services
+					cl->failban = account->failban;
+
+					memcpy(&cl->ctab, &account->ctab, sizeof(cl->ctab));
+					memcpy(&cl->ttab, &account->ttab, sizeof(cl->ttab));
+#ifdef WEBIF
+					int32_t i;
+					for(i = 0; i < CS_ECM_RINGBUFFER_MAX; i++) {
+						cl->cwlastresptimes[i].duration = 0;
+						cl->cwlastresptimes[i].timestamp = time((time_t*)0);
+						cl->cwlastresptimes[i].rc = 0;
+					}
+					cl->cwlastresptimes_last = 0;
+#endif
+					if (account->uniq)
+						cs_fake_client(cl, account->usr, (account->uniq == 1 || account->uniq == 2)?account->uniq+2:account->uniq, cl->ip);
+#ifdef CS_ANTICASC
+					ac_init_client(cl, account);
+#endif
+				}
+			} else {
+				if (ph[cl->ctyp].type & MOD_CONN_NET) {
+					cs_debug_mask(D_TRACE, "client '%s', thread=%8lX not found in db (or password changed)", cl->account->usr, (unsigned long)cl->thread);
+					kill_thread(cl);
+				} else {
+					cl->account = first_client->account;
+				}
+			}
+		} else {
+			cl->account = NULL;
+		}
+}
+
+struct s_client * create_client(IN_ADDR_T ip) {
+	struct s_client *cl;
+
+	if(cs_malloc(&cl, sizeof(struct s_client), -1)){
+		//client part
+		IP_ASSIGN(cl->ip, ip);
+		cl->account = first_client->account;
+
+		//master part
+		pthread_mutex_init(&cl->thread_lock, NULL);
+
+		cl->login=cl->last=time((time_t *)0);
+
+		cl->tid = (uint32_t)(uintptr_t)cl;	// Use pointer adress of client as threadid (for monitor and log)
+
+		//Now add new client to the list:
+		struct s_client *last;
+		cs_writelock(&clientlist_lock);
+		if(sizeof(uintptr_t) > 4){		// 64bit systems can have collisions because of the cast so lets check if there are some
+			int8_t found;
+			do{
+				found = 0;
+				for (last=first_client; last; last=last->next){
+					if(last->tid == cl->tid){
+						found = 1;
+						break;
+					}
+				}
+				if(found || cl->tid == 0){
+					cl->tid = (uint32_t)rand();
+				}
+			} while (found || cl->tid == 0);
+		}
+		for (last=first_client; last->next != NULL; last=last->next); //ends with cl on last client
+		last->next = cl;
+		cs_writeunlock(&clientlist_lock);
+	} else {
+		cs_log("max connections reached (out of memory) -> reject client %s", IP_ISSET(ip) ? cs_inet_ntoa(ip) : "with null address");
+		return NULL;
+	}
+	return(cl);
+}
+
+
+/* Creates the master client of OSCam and inits some global variables/mutexes. */
+static void init_first_client(void)
+{
+	// get username OScam is running under
+	struct passwd pwd;
+	char buf[256];
+	struct passwd *pwdbuf;
+	if ((getpwuid_r(getuid(), &pwd, buf, sizeof(buf), &pwdbuf)) == 0){
+		if(cs_malloc(&processUsername, strlen(pwd.pw_name) + 1, -1))
+			cs_strncpy(processUsername, pwd.pw_name, strlen(pwd.pw_name) + 1);
+		else
+			processUsername = "root";
+	} else
+		processUsername = "root";
+
+  if(!cs_malloc(&first_client, sizeof(struct s_client), -1)){
+    fprintf(stderr, "Could not allocate memory for master client, exiting...");
+    exit(1);
+  }
+  first_client->next = NULL; //terminate clients list with NULL
+  first_client->login=time((time_t *)0);
+  set_localhost_ip(&first_client->ip);
+  first_client->typ='s';
+  first_client->thread=pthread_self();
+  struct s_auth *null_account;
+  if(!cs_malloc(&null_account, sizeof(struct s_auth), -1)){
+  	fprintf(stderr, "Could not allocate memory for master account, exiting...");
+    exit(1);
+  }
+  first_client->account = null_account;
+  if (pthread_setspecific(getclient, first_client)) {
+    fprintf(stderr, "Could not setspecific getclient in master process, exiting...");
+    exit(1);
+  }
+
+#if defined(WITH_LIBUSB)
+  cs_lock_create(&sr_lock, 10, "sr_lock");
+#endif
+  cs_lock_create(&system_lock, 5, "system_lock");
+  cs_lock_create(&gethostbyname_lock, 10, "gethostbyname_lock");
+  cs_lock_create(&clientlist_lock, 5, "clientlist_lock");
+  cs_lock_create(&readerlist_lock, 5, "readerlist_lock");
+  cs_lock_create(&fakeuser_lock, 5, "fakeuser_lock");
+  cs_lock_create(&ecmcache_lock, 5, "ecmcache_lock");
+  cs_lock_create(&readdir_lock, 5, "readdir_lock");
+
+  coolapi_open_all();
+}
+
 /* Checks if the date of the system is correct and waits if necessary. */
 static void init_check(void){
 	char *ptr = __DATE__;
@@ -1027,7 +1273,6 @@ static int32_t start_listener(struct s_module *ph, int32_t port_idx)
   int32_t ov=1, timeout, is_udp, i;
   char ptxt[2][32];
   struct SOCKADDR sad;     /* structure to hold server's address */
-  socklen_t sad_len;
   cs_log("Starting listener %d", port_idx);
 
   ptxt[0][0]=ptxt[1][0]='\0';
@@ -1042,10 +1287,8 @@ static int32_t start_listener(struct s_module *ph, int32_t port_idx)
 #ifdef IPV6SUPPORT
   SIN_GET_FAMILY(sad) = AF_INET6;            /* set family to Internet     */
   SIN_GET_ADDR(sad) = in6addr_any;
-  sad_len = sizeof(struct sockaddr_in6);
 #else
   sad.sin_family = AF_INET;            /* set family to Internet     */
-  sad_len = sizeof(struct sockaddr);
   if (!ph->s_ip)
     ph->s_ip=cfg.srvip;
   if (ph->s_ip)
@@ -1078,29 +1321,18 @@ static int32_t start_listener(struct s_module *ph, int32_t port_idx)
   if ((ph->ptab->ports[port_idx].fd = socket(s_domain, s_type, s_proto)) < 0)
   {
     cs_log("%s: Cannot create socket (errno=%d: %s)", ph->desc, errno, strerror(errno));
-#ifdef IPV6SUPPORT
-    cs_log("%s: Trying fallback to IPv4", ph->desc);
-    s_domain = PF_INET;
-    if ((ph->ptab->ports[port_idx].fd = socket(s_domain, s_type, s_proto)) < 0)
-    {
-      cs_log("%s: Cannot create socket (errno=%d: %s)", ph->desc, errno, strerror(errno));
-      return(0);
-    }
-#else
     return(0);
-#endif
   }
 
 #ifdef IPV6SUPPORT
-// azbox toolchain do not have this define
-#ifndef IPV6_V6ONLY
-#define IPV6_V6ONLY 26
-#endif
   // set the server socket option to listen on IPv4 and IPv6 simultaneously
   int val = 0;
   if (setsockopt(ph->ptab->ports[port_idx].fd, IPPROTO_IPV6, IPV6_V6ONLY, (void *)&val, sizeof(val))<0)
   {
     cs_log("%s: setsockopt(IPV6_V6ONLY) failed (errno=%d: %s)", ph->desc, errno, strerror(errno));
+    close(ph->ptab->ports[port_idx].fd);
+    ph->ptab->ports[port_idx].fd = 0;
+    return 0;
   }
 #endif
 
@@ -1128,17 +1360,17 @@ static int32_t start_listener(struct s_module *ph, int32_t port_idx)
 
   while (timeout--)
   {
-    if (bind(ph->ptab->ports[port_idx].fd, (struct sockaddr *)&sad, sad_len) < 0)
+    if (bind(ph->ptab->ports[port_idx].fd, (struct sockaddr *)&sad, sizeof (sad))<0)
     {
       if (timeout)
       {
-        cs_log("%s: Bind request failed (%s), waiting another %d seconds",
-               ph->desc, strerror(errno), timeout);
+        cs_log("%s: Bind request failed, waiting another %d seconds",
+               ph->desc, timeout);
         cs_sleepms(1000);
       }
       else
       {
-        cs_log("%s: Bind request failed (%s), giving up", ph->desc, strerror(errno));
+        cs_log("%s: Bind request failed, giving up", ph->desc);
         close(ph->ptab->ports[port_idx].fd);
         return(ph->ptab->ports[port_idx].fd=0);
       }
@@ -1176,6 +1408,24 @@ static int32_t start_listener(struct s_module *ph, int32_t port_idx)
 	return(ph->ptab->ports[port_idx].fd);
 }
 
+/* Resolves the ip of the hostname of the specified account and saves it in account->dynip.
+   If the hostname is not configured, the ip is set to 0. */
+void cs_user_resolve(struct s_auth *account){
+	if (account->dyndns[0]){
+		IN_ADDR_T lastip;
+		IP_ASSIGN(lastip, account->dynip);
+#ifdef IPV6SUPPORT
+		cs_getIPv6fromHost((char*)account->dyndns, &account->dynip, NULL);
+#else
+		account->dynip = cs_getIPfromHost((char*)account->dyndns);
+#endif
+
+		if (!IP_EQUAL(lastip, account->dynip))  {
+			cs_log("%s: resolved ip=%s", (char*)account->dyndns, cs_inet_ntoa(account->dynip));
+		}
+	} else set_null_ip(&account->dynip);
+}
+
 /* Starts a thread named nameroutine with the start function startroutine. */
 void start_thread(void * startroutine, char * nameroutine) {
 	pthread_t temp;
@@ -1199,10 +1449,6 @@ void start_thread(void * startroutine, char * nameroutine) {
   If the own thread has to be cancelled, cs_exit or cs_disconnect_client has to be used. */
 void kill_thread(struct s_client *cl) {
 	if (!cl || cl->kill) return;
-	if (cl == cur_client()) {
-		cs_log("Trying to kill myself, exiting.");
-		cs_exit(0);
-	}
 	add_job(cl, ACTION_CLIENT_KILL, NULL, 0); //add kill job, ...
 	cl->kill=1;                               //then set kill flag!
 }
@@ -1220,7 +1466,6 @@ void remove_reader_from_active(struct s_reader *rdr) {
 		}
 	}
 	rdr->next = NULL;
-	rdr->active=0;
 	cs_writeunlock(&readerlist_lock);
 }
 
@@ -1259,7 +1504,7 @@ void add_reader_to_active(struct s_reader *rdr) {
 				if (rdr->client == cl)
 					break;
 
-			if (cl && rdr->client == cl) {
+			if (rdr->client == cl) {
 				prev->next = cl->next; //remove client from list
 				cl->next = first_client->next;
 				first_client->next = cl;
@@ -1279,7 +1524,7 @@ void add_reader_to_active(struct s_reader *rdr) {
 					prev->next != NULL; prev = prev->next, cl = cl->next)
 				if (rdr->client == cl)
 					break;
-			if (cl && rdr->client == cl) {
+			if (rdr->client == cl) {
 				prev->next = cl->next; //remove client from list
 				cl->next = rdr_prv->client->next;
 				rdr_prv->client->next = cl;
@@ -1287,7 +1532,7 @@ void add_reader_to_active(struct s_reader *rdr) {
 		}
 
 	} else first_active_reader = rdr;
-	rdr->active=1;
+
 	cs_writeunlock(&clientlist_lock);
 	cs_writeunlock(&readerlist_lock);
 }
@@ -1298,8 +1543,8 @@ static int32_t restart_cardreader_int(struct s_reader *rdr, int32_t restart) {
 	struct s_client *cl = rdr->client;
 	if (restart){
 		remove_reader_from_active(rdr);		//remove from list
-		kill_thread(cl); //kill old thread
-		cs_sleepms(500);
+    		kill_thread(cl); //kill old thread
+    		cs_sleepms(500);
 	}
 
 	while (restart && is_valid_client(cl)) {
@@ -1315,7 +1560,7 @@ static int32_t restart_cardreader_int(struct s_reader *rdr, int32_t restart) {
 	rdr->tcp_block_delay = 100;
 	cs_ftime(&rdr->tcp_block_connect_till);
 
-	if (rdr->device[0] && is_cascading_reader(rdr)) {
+	if (rdr->device[0] && (rdr->typ & R_IS_CASCADING)) {
 		if (!rdr->ph.num) {
 			rdr_log(rdr, "Protocol Support missing. (typ=%d)", rdr->typ);
 			return 0;
@@ -1367,7 +1612,9 @@ static void init_cardreader(void) {
 	cs_writelock(&system_lock);
 	struct s_reader *rdr;
 
-	cardreader_init_locks();
+#ifdef WITH_CARDREADER
+	ICC_Async_Init_Locks();
+#endif
 
 	LL_ITER itr = ll_iter_create(configured_readers);
 	while((rdr = ll_iter_next(&itr))) {
@@ -1376,12 +1623,350 @@ static void init_cardreader(void) {
 		}
 	}
 
+#ifdef WITH_LB
 	load_stat_from_file();
+#endif
 	cs_writeunlock(&system_lock);
 }
 
+static void cs_fake_client(struct s_client *client, char *usr, int32_t uniq, IN_ADDR_T ip)
+{
+    /* Uniq = 1: only one connection per user
+     *
+     * Uniq = 2: set (new connected) user only to fake if source
+     *           ip is different (e.g. for newcamd clients with
+     *	         different CAID's -> Ports)
+     *
+     * Uniq = 3: only one connection per user, but only the last
+     *           login will survive (old mpcs behavior)
+     *
+     * Uniq = 4: set user only to fake if source ip is
+     *           different, but only the last login will survive
+     */
+
+	struct s_client *cl;
+	struct s_auth *account;
+	cs_writelock(&fakeuser_lock);
+	for (cl=first_client->next; cl ; cl=cl->next)
+	{
+		account = cl->account;
+		if (cl != client && (cl->typ == 'c') && !cl->dup && account && !strcmp(account->usr, usr)
+		   && (uniq < 5) && ((uniq % 2) || (!IP_EQUAL(cl->ip, ip))))
+		{
+		        char buf[20];
+			if (uniq  == 3 || uniq == 4)
+			{
+				cl->dup = 1;
+				cl->aureader_list = NULL;
+				cs_strncpy(buf, cs_inet_ntoa(cl->ip), sizeof(buf));
+				cs_log("client(%8lX) duplicate user '%s' from %s (prev %s) set to fake (uniq=%d)",
+					(unsigned long)cl->thread, usr, cs_inet_ntoa(ip), buf, uniq);
+				if (cl->failban & BAN_DUPLICATE) {
+					cs_add_violation(cl, usr);
+				}
+				if (cfg.dropdups){
+					cs_writeunlock(&fakeuser_lock);
+					kill_thread(cl);
+					cs_writelock(&fakeuser_lock);
+				}
+			}
+			else
+			{
+				client->dup = 1;
+				client->aureader_list = NULL;
+				cs_strncpy(buf, cs_inet_ntoa(ip), sizeof(buf));
+				cs_log("client(%8lX) duplicate user '%s' from %s (current %s) set to fake (uniq=%d)",
+					(unsigned long)pthread_self(), usr, cs_inet_ntoa(cl->ip), buf, uniq);
+				if (client->failban & BAN_DUPLICATE) {
+					cs_add_violation_by_ip(ip, ph[client->ctyp].ptab->ports[client->port_idx].s_port, usr);
+				}
+				if (cfg.dropdups){
+					cs_writeunlock(&fakeuser_lock);		// we need to unlock here as cs_disconnect_client kills the current thread!
+					cs_disconnect_client(client);
+				}
+				break;
+			}
+		}
+	}
+	cs_writeunlock(&fakeuser_lock);
+}
+
+int32_t cs_auth_client(struct s_client * client, struct s_auth *account, const char *e_txt)
+{
+	int32_t rc=0;
+	unsigned char md5tmp[MD5_DIGEST_LENGTH];
+	char buf[32];
+	char *t_crypt="encrypted";
+	char *t_plain="plain";
+	char *t_grant=" granted";
+	char *t_reject=" rejected";
+	char *t_msg[]= { buf, "invalid access", "invalid ip", "unknown reason", "protocol not allowed" };
+	memset(&client->grp, 0xff, sizeof(uint64_t));
+	//client->grp=0xffffffffffffff;
+	if ((intptr_t)account != 0 && (intptr_t)account != -1 && account->disabled){
+		cs_add_violation(client, account->usr);
+		cs_log("%s %s-client %s%s (%s%sdisabled account)",
+				client->crypted ? t_crypt : t_plain,
+				ph[client->ctyp].desc,
+				IP_ISSET(client->ip) ? cs_inet_ntoa(client->ip) : "",
+				IP_ISSET(client->ip) ? t_reject : t_reject+1,
+				e_txt ? e_txt : "",
+				e_txt ? " " : "");
+		return(1);
+	}
+
+	// check whether client comes in over allowed protocol
+	if ((intptr_t)account != 0 && (intptr_t)account != -1 && (intptr_t)account->allowedprotocols &&
+			(((intptr_t)account->allowedprotocols & ph[client->ctyp].listenertype) != ph[client->ctyp].listenertype )){
+		cs_add_violation(client, account->usr);
+		cs_log("%s %s-client %s%s (%s%sprotocol not allowed)",
+						client->crypted ? t_crypt : t_plain,
+						ph[client->ctyp].desc,
+						IP_ISSET(client->ip) ? cs_inet_ntoa(client->ip) : "",
+						IP_ISSET(client->ip) ? t_reject : t_reject+1,
+						e_txt ? e_txt : "",
+						e_txt ? " " : "");
+		return(1);
+	}
+
+	client->account=first_client->account;
+	switch((intptr_t)account)
+	{
+	case 0:           // reject access
+		rc=1;
+		cs_add_violation(client, NULL);
+		cs_log("%s %s-client %s%s (%s)",
+				client->crypted ? t_crypt : t_plain,
+				ph[client->ctyp].desc,
+				IP_ISSET(client->ip) ? cs_inet_ntoa(client->ip) : "",
+				IP_ISSET(client->ip) ? t_reject : t_reject+1,
+				e_txt ? e_txt : t_msg[rc]);
+		break;
+	default:            // grant/check access
+		if (IP_ISSET(client->ip) && account->dyndns[0]) {
+			if (!IP_EQUAL(client->ip, account->dynip))
+				cs_user_resolve(account);
+			if (!IP_EQUAL(client->ip, account->dynip)) {
+				cs_add_violation(client, account->usr);
+				rc=2;
+			}
+		}
+
+		client->monlvl=account->monlvl;
+		client->account = account;
+		if (!rc)
+		{
+			client->dup=0;
+			if (client->typ=='c' || client->typ=='m')
+				client->pcrc = crc32(0L, MD5((uchar *)account->pwd, strlen(account->pwd), md5tmp), MD5_DIGEST_LENGTH);
+			if (client->typ=='c')
+			{
+				client->last_caid = 0xFFFE;
+				client->last_srvid = 0xFFFE;
+				client->expirationdate = account->expirationdate;
+				client->disabled = account->disabled;
+				client->allowedtimeframe[0] = account->allowedtimeframe[0];
+				client->allowedtimeframe[1] = account->allowedtimeframe[1];
+				if(account->firstlogin == 0) account->firstlogin = time((time_t*)0);
+				client->failban = account->failban;
+				client->c35_suppresscmd08 = account->c35_suppresscmd08;
+				client->ncd_keepalive = account->ncd_keepalive;
+				client->grp = account->grp;
+				client->aureader_list = account->aureader_list;
+				client->autoau = account->autoau;
+				client->tosleep = (60*account->tosleep);
+				client->c35_sleepsend = account->c35_sleepsend;
+				memcpy(&client->ctab, &account->ctab, sizeof(client->ctab));
+				if (account->uniq)
+					cs_fake_client(client, account->usr, account->uniq, client->ip);
+				client->ftab  = account->ftab;   // IDENT filter
+				client->cltab = account->cltab;  // CLASS filter
+				client->fchid = account->fchid;  // CHID filter
+				client->sidtabok= account->sidtabok;   // services
+				client->sidtabno= account->sidtabno;   // services
+				memcpy(&client->ttab, &account->ttab, sizeof(client->ttab));
+#ifdef CS_ANTICASC
+				ac_init_client(client, account);
+#endif
+			}
+		}
+	case -1:            // anonymous grant access
+		if (rc)
+			t_grant=t_reject;
+		else {
+			if (client->typ=='m')
+				snprintf(t_msg[0], sizeof(buf), "lvl=%d", client->monlvl);
+			else {
+				int32_t rcount = ll_count(client->aureader_list);
+				snprintf(buf, sizeof(buf), "au=");
+				if (!rcount)
+					snprintf(buf+3, sizeof(buf)-3, "off");
+				else {
+					if (client->autoau)
+						snprintf(buf+3, sizeof(buf)-3, "auto (%d reader)", rcount);
+					else
+						snprintf(buf+3, sizeof(buf)-3, "on (%d reader)", rcount);
+				}
+			}
+		}
+
+		cs_log("%s %s-client %s%s (%s, %s)",
+			client->crypted ? t_crypt : t_plain,
+			e_txt ? e_txt : ph[client->ctyp].desc,
+			IP_ISSET(client->ip) ? cs_inet_ntoa(client->ip) : "",
+			IP_ISSET(client->ip) ? t_grant : t_grant+1,
+			username(client), t_msg[rc]);
+
+		break;
+	}
+	return(rc);
+}
+
+void cs_disconnect_client(struct s_client * client)
+{
+	char buf[32]={0};
+	if (IP_ISSET(client->ip))
+		snprintf(buf, sizeof(buf), " from %s", cs_inet_ntoa(client->ip));
+	cs_log("%s disconnected %s", username(client), buf);
+	if (client == cur_client())
+		cs_exit(0);
+	else
+		kill_thread(client);
+}
+
+#ifdef CS_CACHEEX
+static void cs_cache_push_to_client(struct s_client *cl, ECM_REQUEST *er)
+{
+	ECM_REQUEST *erc = cs_malloc(&erc, sizeof(ECM_REQUEST), 0);
+	memcpy(erc, er, sizeof(ECM_REQUEST));
+	add_job(cl, ACTION_CACHE_PUSH_OUT, erc, sizeof(ECM_REQUEST));
+}
+
 /**
- * get ecm from ecmcache
+ * cacheex modes:
+ *
+ * cacheex=1 CACHE PULL:
+ * Situation: oscam A reader1 has cacheex=1, oscam B account1 has cacheex=1
+ *   oscam A gets a ECM request, reader1 send this request to oscam B, oscam B checks his cache
+ *   a. not found in cache: return NOK
+ *   a. found in cache: return OK+CW
+ *   b. not found in cache, but found pending request: wait max cacheexwaittime and check again
+ *   oscam B never requests new ECMs
+ *
+ *   CW-flow: B->A
+ *
+ * cacheex=2 CACHE PUSH:
+ * Situation: oscam A reader1 has cacheex=2, oscam B account1 has cacheex=2
+ *   if oscam B gets a CW, its pushed to oscam A
+ *   reader has normal functionality and can request ECMs
+ *
+ *   Problem: oscam B can only push if oscam A is connected
+ *   Problem or feature?: oscam A reader can request ecms from oscam B
+ *
+ *   CW-flow: B->A
+ *
+ * cacheex=3 REVERSE CACHE PUSH:
+ * Situation: oscam A reader1 has cacheex=3, oscam B account1 has cacheex=3
+ *   if oscam A gets a CW, its pushed to oscam B
+ *
+ *   oscam A never requests new ECMs
+ *
+ *   CW-flow: A->B
+ */
+void cs_cache_push(ECM_REQUEST *er)
+{
+	if (er->rc >= E_NOTFOUND && er->rc != E_UNHANDLED) //Maybe later we could support other rcs
+		return; //NOT FOUND/Invalid
+
+	if (er->cacheex_pushed || (er->ecmcacheptr && er->ecmcacheptr->cacheex_pushed))
+		return;
+
+        int64_t grp;
+        if (er->selected_reader)
+            grp = er->selected_reader->grp;
+        else
+            grp = er->grp;
+
+	//cacheex=2 mode: push (server->remote)
+	struct s_client *cl;
+	cs_readlock(&clientlist_lock);
+	for (cl=first_client->next; cl; cl=cl->next) {
+		if (er->cacheex_src != cl) {
+			if (cl->typ == 'c' && !cl->dup && cl->account && cl->account->cacheex == 2) { //send cache over user
+				if (ph[cl->ctyp].c_cache_push // cache-push able
+						&& (!grp || (cl->grp & grp)) //Group-check
+						&& chk_srvid(cl, er) //Service-check
+						&& (chk_caid(er->caid, &cl->ctab) > 0))  //Caid-check
+				{
+					if(ph[cl->ctyp].c_cache_push_chk)
+						if (!ph[cl->ctyp].c_cache_push_chk(cl, er))
+							continue;
+
+					cs_cache_push_to_client(cl, er);
+				}
+			}
+		}
+	}
+	cs_readunlock(&clientlist_lock);
+
+	//cacheex=3 mode: reverse push (reader->server)
+
+	cs_readlock(&readerlist_lock);
+	cs_readlock(&clientlist_lock);
+
+	struct s_reader *rdr;
+	for (rdr = first_active_reader; rdr; rdr = rdr->next) {
+		struct s_client *cl = rdr->client;
+		if (cl && er->cacheex_src != cl && rdr->cacheex == 3) { //send cache over reader
+			if (rdr->ph.c_cache_push
+				&& (!grp || (rdr->grp & grp)) //Group-check
+				&& chk_srvid(cl, er) //Service-check
+				&& chk_ctab(er->caid, &rdr->ctab))  //Caid-check
+			{
+				// cc-nodeid-list-check
+				if(rdr->ph.c_cache_push_chk)
+					if (!rdr->ph.c_cache_push_chk(cl, er))
+						continue;
+
+				cs_cache_push_to_client(cl, er);
+			}
+		}
+	}
+
+	cs_readunlock(&clientlist_lock);
+	cs_readunlock(&readerlist_lock);
+
+	er->cacheex_pushed = 1;
+	if (er->ecmcacheptr) er->ecmcacheptr->cacheex_pushed = 1;
+}
+
+static int8_t is_match_alias(struct s_client *cl, ECM_REQUEST *er)
+{
+	return cl && cl->account && cl->account->cacheex == 1 && is_cacheex_matcher_matching(NULL, er);
+}
+
+static int8_t match_alias(struct s_client *cl, ECM_REQUEST *er, ECM_REQUEST *ecm)
+{
+	if (cl && cl->account && cl->account->cacheex == 1) {
+		struct s_cacheex_matcher *entry = is_cacheex_matcher_matching(ecm, er);
+		if (entry) {
+			int32_t diff = comp_timeb(&er->tps, &ecm->tps);
+			if (diff > entry->valid_from && diff < entry->valid_to) {
+#ifdef WITH_DEBUG
+				char buf[CXM_FMT_LEN];
+				format_cxm(entry, buf, CXM_FMT_LEN);
+				cs_debug_mask(D_CACHEEX, "cacheex-matching for: %s", buf);
+#endif
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+#endif
+
+/**
+ * ecm cache
  **/
 struct ecm_request_t *check_cwcache(ECM_REQUEST *er, struct s_client *cl)
 {
@@ -1390,47 +1975,44 @@ struct ecm_request_t *check_cwcache(ECM_REQUEST *er, struct s_client *cl)
 	time_t timeout = now-cfg.max_cache_time;
 	struct ecm_request_t *ecm;
 	uint64_t grp = cl?cl->grp:0;
-#ifdef CS_CACHEEX
-	// precalculate for better performance
-	uint8_t ecmd5chk = checkECMD5(er);
-	bool hasMatchAlias = cacheex_is_match_alias(cl, er);
-#endif
+
 	cs_readlock(&ecmcache_lock);
 	for (ecm = ecmcwcache; ecm; ecm = ecm->next) {
 		if (ecm->tps.time < timeout) {
 			ecm = NULL;
 			break;
 		}
-		if (ecm->ecmcacheptr)
-			continue;
 
 		if ((grp && ecm->grp && !(grp & ecm->grp)))
 			continue;
 
 #ifdef CS_CACHEEX
-		if (!hasMatchAlias || !cacheex_match_alias(cl, er, ecm)) {
-			//CWs from csp/cacheex have no ecms, csp ecmd5 is invalid, cacheex has ecmd5
-			if (ecmd5chk && checkECMD5(ecm)){
-				if (memcmp(ecm->ecmd5, er->ecmd5, CS_ECMSTORESIZE))
-					continue; // no match
-			} else if (ecm->csp_hash != er->csp_hash) //fallback for csp only
-				continue; // no match
-		}
+		if (!match_alias(cl, er, ecm)) {
+#endif
+			if (!(ecm->caid == er->caid || (ecm->ocaid && er->ocaid && ecm->ocaid == er->ocaid)))
+				continue;
+
+#ifdef CS_CACHEEX
+			//CWs from csp have no ecms, so ecm->l=0. ecmd5 is invalid, so do not check!
+			if (ecm->csp_hash != er->csp_hash)
+				continue;
+
+			if (ecm->l > 0 && memcmp(ecm->ecmd5, er->ecmd5, CS_ECMSTORESIZE))
+				continue;
+
 #else
-		if (memcmp(ecm->ecmd5, er->ecmd5, CS_ECMSTORESIZE))
-				continue; // no match
+			if (memcmp(ecm->ecmd5, er->ecmd5, CS_ECMSTORESIZE))
+				continue;
+#endif
+#ifdef CS_CACHEEX
+		}
 #endif
 
-		if (er->caid != ecm->caid && ecm->rc >= E_NOTFOUND && !is_betatunnel_caid(er->caid))
-			continue; //CW for the cached ECM wasn't found but now the client asks on a different caid so give it another try
-				
-		if (ecm->rc != E_99){
-			cs_readunlock(&ecmcache_lock);
-			return ecm;
-		}
+		if (ecm->rc != E_99)
+			break;
 	}
 	cs_readunlock(&ecmcache_lock);
-	return NULL; // nothing found so return null
+	return ecm;
 }
 
 
@@ -1454,18 +2036,155 @@ static void distribute_ecm(ECM_REQUEST *er, int32_t rc)
 	cs_readlock(&ecmcache_lock);
 	for (ecm = ecmcwcache; ecm; ecm = ecm->next) {
 		if (ecm != er && ecm->rc >= E_99 && ecm->ecmcacheptr == er) {
-			cacheex_init_cacheex_src(ecm, er);
+#ifdef CS_CACHEEX
+			if (!ecm->cacheex_src)
+				ecm->cacheex_src = er->cacheex_src;
+#endif
 			write_ecm_answer(er->selected_reader, ecm, rc, 0, er->cw, NULL);
 		}
 	}
 	cs_readunlock(&ecmcache_lock);
 }
 
-void update_chid(ECM_REQUEST *er)
+static void update_chid(ECM_REQUEST *er)
 {
-	if( (er->caid>>8) == 0x06 && !er->chid && er->ecmlen > 7)
+	if( (er->caid>>8) == 0x06 && !er->chid && er->l > 7)
 		er->chid = (er->ecm[6]<<8)|er->ecm[7];
 }
+
+#ifdef CS_CACHEEX
+static int8_t cs_add_cache_int(struct s_client *cl, ECM_REQUEST *er, int8_t csp)
+{
+	if (!cl)
+		return 0;
+	if (!csp && cl->reader && cl->reader->cacheex!=2) { //from reader
+		cs_debug_mask(D_CACHEEX, "CACHEX received, but disabled for %s", username(cl));
+		return 0;
+	}
+	if (!csp && !cl->reader && cl->account && cl->account->cacheex!=3) { //from user
+		cs_debug_mask(D_CACHEEX, "CACHEX received, but disabled for %s", username(cl));
+		return 0;
+	}
+	if (!csp && !cl->reader && !cl->account) { //not active!
+		cs_debug_mask(D_CACHEEX, "CACHEX received, but invalid client state %s", username(cl));
+		return 0;
+	}
+
+	if (er->rc < E_NOTFOUND) { //=FOUND Check CW:
+		uint8_t i, c;
+		for (i = 0; i < 16; i += 4) {
+			c = ((er->cw[i] + er->cw[i + 1] + er->cw[i + 2]) & 0xff);
+			if (er->cw[i + 3] != c) {
+				cs_ddump_mask(D_CACHEEX, er->cw, 16,
+						"push received cw with chksum error from %s", csp?"csp":username(cl));
+				return 0;
+			}
+		}
+
+		//Check for NULL CWs:
+		for (c=i=0; !c && i < 16; i++) {
+			c = er->cw[i];
+		}
+		if (!c) {
+			cs_ddump_mask(D_CACHEEX, er->cw, 16,
+					"push received null cw from %s", csp?"csp":username(cl));
+			return 0;
+		}
+	}
+
+	er->grp = cl->grp;
+//	er->ocaid = er->caid;
+	if (er->rc < E_NOTFOUND) //map FOUND to CACHEEX
+		er->rc = E_CACHEEX;
+	er->cacheex_src = cl;
+	er->client = NULL; //No Owner! So no fallback!
+
+	if (er->l) {
+		uint16_t *lp;
+		for (lp=(uint16_t *)er->ecm+(er->l>>2), er->checksum=0; lp>=(uint16_t *)er->ecm; lp--)
+			er->checksum^=*lp;
+
+		int32_t offset = 3;
+		if ((er->caid >> 8) == 0x17)
+			offset = 13;
+		unsigned char md5tmp[MD5_DIGEST_LENGTH];
+		memcpy(er->ecmd5, MD5(er->ecm+offset, er->l-offset, md5tmp), CS_ECMSTORESIZE);
+		er->csp_hash = csp_ecm_hash(er);
+		//csp has already initialized these hashcode
+
+        	update_chid(er);
+        }
+
+	struct ecm_request_t *ecm = check_cwcache(er, cl);
+
+	if (!ecm) {
+	        if (er->rc < E_NOTFOUND) { // Do NOT add cacheex - not founds!
+	            cs_writelock(&ecmcache_lock);
+	            er->next = ecmcwcache;
+	            ecmcwcache = er;
+	            cs_writeunlock(&ecmcache_lock);
+
+	            er->selected_reader = cl->reader;
+                }
+
+		cs_cache_push(er);  //cascade push!
+
+		if (er->rc < E_NOTFOUND)
+		    cs_add_cacheex_stats(cl, er->caid, er->srvid, er->prid, 1);
+
+		cl->cwcacheexgot++;
+		if (cl->account)
+		    cl->account->cwcacheexgot++;
+		first_client->cwcacheexgot++;
+		
+		debug_ecm(D_CACHEEX, "got pushed ECM %s from %s", buf, csp ? "csp" : username(cl));
+
+                if (er->rc < E_NOTFOUND)
+                    return 1;
+                else
+                    return 0;
+	}
+	else {
+		if(er->rc < ecm->rc) {
+			if (ecm->csp_lastnodes == NULL) {
+				ecm->csp_lastnodes = er->csp_lastnodes;
+				er->csp_lastnodes = NULL;
+			}
+			ecm->cacheex_src = cl;
+			ecm->cacheex_pushed = 0;
+
+			write_ecm_answer(cl->reader, ecm, er->rc, er->rcEx, er->cw, ecm->msglog);
+
+			if (er->rc < E_NOTFOUND)
+				ecm->selected_reader = cl->reader;
+			
+			cs_cache_push(ecm);  //cascade push!
+
+			if (er->rc < E_NOTFOUND)
+				cs_add_cacheex_stats(cl, er->caid, er->srvid, er->prid, 1);
+
+			cl->cwcacheexgot++;
+			if (cl->account)
+                                cl->account->cwcacheexgot++;
+			first_client->cwcacheexgot++;
+
+			debug_ecm(D_CACHEEX, "replaced pushed ECM %s from %s", buf, csp ? "csp" : username(cl));
+		} else {
+			debug_ecm(D_CACHEEX, "ignored duplicate pushed ECM %s from %s", buf, csp ? "csp" : username(cl));
+		}
+
+		return 0;
+	}
+}
+
+void cs_add_cache(struct s_client *cl, ECM_REQUEST *er, int8_t csp)
+{
+	if (!cs_add_cache_int(cl, er, csp))
+		free_ecm(er);
+}
+
+#endif
+
 
 int32_t write_ecm_answer(struct s_reader * reader, ECM_REQUEST *er, int8_t rc, uint8_t rcEx, uchar *cw, char *msglog)
 {
@@ -1474,8 +2193,8 @@ int32_t write_ecm_answer(struct s_reader * reader, ECM_REQUEST *er, int8_t rc, u
 	struct s_ecm_answer *ea = NULL, *ea_list, *ea_org = NULL;
 	struct timeb now;
 
-	//if (!er->parent && !er->client) //distribute also if no client is set!
-	//	return 0;
+	if (!er->parent && !er->client)
+		return 0;
 
 	cs_ftime(&now);
 
@@ -1485,10 +2204,11 @@ int32_t write_ecm_answer(struct s_reader * reader, ECM_REQUEST *er, int8_t rc, u
 		er->rc = rc;
 		er->idx = 0;
 		er = er->parent; //Now er is "original" ecm, before it was the reader-copy
-		er->grp |= reader->grp; // extend grp by grp of answering reader so clients in other group use cache
 
-		if (er->rc < E_99) {
+        	if (er->rc < E_99) {
+#ifdef WITH_LB
 			send_reader_stat(reader, er, NULL, rc);
+#endif
 			return 0;  //Already done
 		}
 	}
@@ -1498,10 +2218,9 @@ int32_t write_ecm_answer(struct s_reader * reader, ECM_REQUEST *er, int8_t rc, u
 			ea_org = ea_list;
 	}
 
-	if (!ea_org) {
-		if (!cs_malloc(&ea, sizeof(struct s_ecm_answer))) // Freed by ACTION_CLIENT_ECM_ANSWER
-			return 0;
-	} else
+	if (!ea_org)
+		ea = cs_malloc(&ea, sizeof(struct s_ecm_answer), 0); //Free by ACTION_CLIENT_ECM_ANSWER!
+	else
 		ea = ea_org;
 
 	if (cw)
@@ -1547,8 +2266,7 @@ int32_t write_ecm_answer(struct s_reader * reader, ECM_REQUEST *er, int8_t rc, u
 	struct s_client *cl = er->client;
 	if (cl && !cl->kill) {
 		if (ea_org) { //duplicate for queue
-			if (!cs_malloc(&ea, sizeof(struct s_ecm_answer)))
-				return 0;
+			ea = cs_malloc(&ea, sizeof(struct s_ecm_answer), 0);
 			memcpy(ea, ea_org, sizeof(struct s_ecm_answer));
 		}
 		add_job(cl, ACTION_CLIENT_ECM_ANSWER, ea, sizeof(struct s_ecm_answer));
@@ -1567,7 +2285,10 @@ int32_t write_ecm_answer(struct s_reader * reader, ECM_REQUEST *er, int8_t rc, u
 			reader->resetcounter = 0;
 			rdr_log(reader, "Resetting reader, resetcyle of %d ecms reached", reader->resetcycle);
 			reader->card_status = CARD_NEED_INIT;
-			cardreader_reset(cl);
+#ifdef WITH_CARDREADER
+      			//reader_reset(reader);
+      			add_job(cl, ACTION_READER_RESET, NULL, 0);
+#endif
 		}
 	}
 	else
@@ -1595,17 +2316,42 @@ ECM_REQUEST *get_ecmtask(void)
 	struct s_client *cl = cur_client();
 	if(!cl) return NULL;
 
-	if (!cs_malloc(&er,sizeof(ECM_REQUEST)))
-		return NULL;
+	if(!cs_malloc(&er,sizeof(ECM_REQUEST), -1)) return NULL;
 
 	cs_ftime(&er->tps);
 	er->rc=E_UNHANDLED;
 	er->client=cl;
 	er->grp = cl->grp;
-	//cs_log("client %s ECMTASK %d multi %d ctyp %d", username(cl), n, (modules[cl->ctyp].multi)?cfg.max_pending:1, cl->ctyp);
+	//cs_log("client %s ECMTASK %d multi %d ctyp %d", username(cl), n, (ph[cl->ctyp].multi)?cfg.max_pending:1, cl->ctyp);
 
 	return(er);
 }
+
+#ifdef WITH_LB
+void send_reader_stat(struct s_reader *rdr, ECM_REQUEST *er, struct s_ecm_answer *ea, int8_t rc)
+{
+#ifdef CS_CACHEEX
+	if (!rdr || rc>=E_99 || rdr->cacheex==1)
+		return;
+#else
+	if (!rdr || rc>=E_99)
+		return;
+#endif
+	if (er->ecmcacheptr) //ignore cache answer
+		return;
+
+	struct timeb tpe;
+	cs_ftime(&tpe);
+	int32_t time = 1000*(tpe.time-er->tps.time)+tpe.millitm-er->tps.millitm;
+	if (time < 1)
+	        time = 1;
+
+	if (ea && (ea->status & READER_FALLBACK) && time > (int32_t)cfg.ftimeout)
+		time = time - cfg.ftimeout;
+
+	add_stat(rdr, er, time, rc);
+}
+#endif
 
 /**
  * Check for NULL CWs
@@ -1639,8 +2385,7 @@ static void add_cascade_data(struct s_client *client, ECM_REQUEST *er)
 			ll_iter_remove_data(&it);
 	}
 	if (!found) { //add it if not found
-		if (!cs_malloc(&cu, sizeof(struct s_cascadeuser)))
-			return;
+		cu = cs_malloc(&cu, sizeof(struct s_cascadeuser), 0);
 		cu->caid = er->caid;
 		cu->prid = er->prid;
 		cu->srvid = er->srvid;
@@ -1687,25 +2432,6 @@ int32_t send_dcw(struct s_client * client, ECM_REQUEST *er)
 	if (er->rc < E_NOTFOUND)
 		checkCW(er);
 
-#ifdef WITH_DEBUG
-        if (cs_dblevel & D_CLIENTECM) {		
-                char buf[ECM_FMT_LEN];
-                format_ecm(er, buf, ECM_FMT_LEN);
-
-                char ecmd5[17*3];                
-                cs_hexdump(0, er->ecmd5, 16, ecmd5, sizeof(ecmd5));
-                char cwstr[17*3];
-                cs_hexdump(0, er->cw, 16, cwstr, sizeof(cwstr));
-#ifdef CS_CACHEEX
-                char csphash[5*3];
-                cs_hexdump(0, (void*)&er->csp_hash, 4, csphash, sizeof(csphash));
-                cs_debug_mask(D_CLIENTECM, "Client %s csphash %s cw %s rc %d %s", username(client), csphash, cwstr, er->rc, buf);
-#else            
-                cs_debug_mask(D_CLIENTECM, "Client %s cw %s rc %d %s", username(client), cwstr, er->rc, buf);
-#endif
-        }
-#endif
-
 	struct s_reader *er_reader = er->selected_reader; //responding reader
 
 	if (er_reader) {
@@ -1731,7 +2457,7 @@ int32_t send_dcw(struct s_client * client, ECM_REQUEST *er)
 		snprintf(erEx, sizeof(erEx)-1, "rejected %s%s", stxtWh[er->rcEx>>4],
 				stxtEx[er->rcEx&0xf]);
 
-	if (cfg.appendchaninfo)
+	if(cfg.mon_appendchaninfo)
 		snprintf(schaninfo, sizeof(schaninfo)-1, " - %s", get_servicename(client, er->srvid, er->caid, channame));
 
 	if(er->msglog[0])
@@ -1740,21 +2466,36 @@ int32_t send_dcw(struct s_client * client, ECM_REQUEST *er)
 	cs_ftime(&tpe);
 	client->cwlastresptime = 1000 * (tpe.time-er->tps.time) + tpe.millitm-er->tps.millitm;
 
-	time_t now = time(NULL);
-	webif_client_add_lastresponsetime(client, client->cwlastresptime, now, er->rc); // add to ringbuffer
+#ifdef WEBIF
+	cs_add_lastresponsetime(client, client->cwlastresptime,time((time_t*)0) ,er->rc); // add to ringbuffer
+#endif
 
 	if (er_reader){
 		struct s_client *er_cl = er_reader->client;
 		if(er_cl){
 			er_cl->cwlastresptime = client->cwlastresptime;
-			webif_client_add_lastresponsetime(er_cl, client->cwlastresptime, now, er->rc);
+#ifdef WEBIF
+			cs_add_lastresponsetime(er_cl, client->cwlastresptime,time((time_t*)0) ,er->rc);
+#endif
 			er_cl->last_srvidptr=client->last_srvidptr;
 		}
 	}
 
-	webif_client_init_lastreader(client, er, er_reader, stxt);
-
-	client->last = now;
+#ifdef WEBIF
+	if (er_reader) {
+		if(er->rc == E_FOUND)
+			cs_strncpy(client->lastreader, er_reader->label, sizeof(client->lastreader));
+		else if (er->rc == E_CACHEEX)
+			cs_strncpy(client->lastreader, "cache3", sizeof(client->lastreader));
+		else if (er->rc < E_NOTFOUND)
+			snprintf(client->lastreader, sizeof(client->lastreader)-1, "%s (cache)", er_reader->label);
+		else
+			cs_strncpy(client->lastreader, stxt[er->rc], sizeof(client->lastreader));
+	}
+	else
+		cs_strncpy(client->lastreader, stxt[er->rc], sizeof(client->lastreader));
+#endif
+	client->last = time((time_t*)0);
 
 	//cs_debug_mask(D_TRACE, "CHECK rc=%d er->cacheex_src=%s", er->rc, username(er->cacheex_src));
 	switch(er->rc) {
@@ -1806,7 +2547,9 @@ int32_t send_dcw(struct s_client * client, ECM_REQUEST *er)
 			first_client->cwignored++;
 	}
 
+#ifdef CS_ANTICASC
 	ac_chk(client, er, 1);
+#endif
 
 	int32_t is_fake = 0;
 	if (er->rc==E_FAKE) {
@@ -1814,7 +2557,7 @@ int32_t send_dcw(struct s_client * client, ECM_REQUEST *er)
 		er->rc=E_FOUND;
 	}
 
-	if (cfg.double_check &&  er->rc == E_FOUND && er->selected_reader && is_double_check_caid(er)) {
+	if (cfg.double_check &&  er->rc < E_NOTFOUND && er->selected_reader && is_double_check_caid(er)) {
 	  if (er->checked == 0) {//First CW, save it and wait for next one
 	    er->checked = 1;
 	    er->origin_reader = er->selected_reader;
@@ -1837,14 +2580,14 @@ int32_t send_dcw(struct s_client * client, ECM_REQUEST *er)
 	  }
 	}
 
-	modules[client->ctyp].send_dcw(client, er);
+	ph[client->ctyp].send_dcw(client, er);
 
 	add_cascade_data(client, er);
 
 	if (is_fake)
 		er->rc = E_FAKE;
 
-	if (!(er->rc == E_SLEEPING && client->cwlastresptime == 0)) {
+	if (client->cwlastresptime > 0) {
 		char buf[ECM_FMT_LEN];
 		format_ecm(er, buf, ECM_FMT_LEN);
 		if (er->reader_avail == 1) {
@@ -1862,7 +2605,19 @@ int32_t send_dcw(struct s_client * client, ECM_REQUEST *er)
 
 	cs_ddump_mask (D_ATR, er->cw, 16, "cw:");
 
-	led_status_cw_not_found(er);
+#if defined(__arm__)
+	if(!er->rc &&cfg.enableled == 1) cs_switch_led(LED2, LED_BLINK_OFF);
+#endif
+
+#ifdef QBOXHD
+	if(cfg.enableled == 2){
+    if (er->rc < E_NOTFOUND) {
+        qboxhd_led_blink(QBOXHD_LED_COLOR_GREEN, QBOXHD_LED_BLINK_MEDIUM);
+    } else if (er->rc <= E_STOPPED) {
+        qboxhd_led_blink(QBOXHD_LED_COLOR_RED, QBOXHD_LED_BLINK_MEDIUM);
+    }
+  }
+#endif
 
 	return 0;
 }
@@ -1934,9 +2689,7 @@ static void request_cw(ECM_REQUEST *er)
 			}
 
 			struct s_reader *rdr = ea->reader;
-			char ecmd5[17*3];                
-            cs_hexdump(0, er->ecmd5, 16, ecmd5, sizeof(ecmd5));
-			cs_debug_mask(D_TRACE | D_CSPCWC, "request_cw stage=%d to reader %s ecm hash=%s", er->stage, rdr?rdr->label:"", ecmd5);
+			cs_debug_mask(D_TRACE, "request_cw stage=%d to reader %s ecm=%04X", er->stage, rdr?rdr->label:"", htons(er->checksum));
 			
 			ea->status |= REQUEST_SENT;
 			er->reader_requested++;
@@ -1970,12 +2723,10 @@ static void chk_dcw(struct s_client *cl, struct s_ecm_answer *ea)
 		return;
 
 	if (eardr) {
-		char ecmd5[17*3];                
-        cs_hexdump(0, ert->ecmd5, 16, ecmd5, sizeof(ecmd5));
-		rdr_debug_mask(eardr, D_TRACE, "ecm answer for ecm hash %s rc=%d", ecmd5, ea->rc);
+		rdr_debug_mask(eardr, D_TRACE, "ecm answer for ecm %04X rc=%d", htons(ert->checksum), ea->rc);
 		//rdr_ddump_mask(eardr, D_TRACE, ea->cw, sizeof(ea->cw), "received cw caid=%04X srvid=%04X hash=%08X",
 		//		ert->caid, ert->srvid, ert->csp_hash);
-		//rdr_ddump_mask(eardr, D_TRACE, ert->ecm, ert->ecmlen, "received cw for ecm caid=%04X srvid=%04X hash=%08X",
+		//rdr_ddump_mask(eardr, D_TRACE, ert->ecm, ert->l, "received cw for ecm caid=%04X srvid=%04X hash=%08X",
 		//		ert->caid, ert->srvid, ert->csp_hash);
 	}
 
@@ -1986,10 +2737,10 @@ static void chk_dcw(struct s_client *cl, struct s_ecm_answer *ea)
 		if (ea->rc == E_FOUND) {
 			eardr->ecmsok++;
 #ifdef CS_CACHEEX
-			struct s_client *eacl = eardr->client;
-			if (cacheex_reader(eardr) && !ert->cacheex_done && eacl) {
+			struct s_client *eacl = eardr?eardr->client:NULL; //reader is null on timeouts
+			if (eardr->cacheex == 1 && !ert->cacheex_done && eacl) {
 				eacl->cwcacheexgot++;
-				cacheex_add_stats(eacl, ea->er->caid, ea->er->srvid, ea->er->prid, 1);
+				cs_add_cacheex_stats(eacl, ea->er->caid, ea->er->srvid, ea->er->prid, 1);
 				first_client->cwcacheexgot++;
 			}
 #endif
@@ -2023,30 +2774,9 @@ static void chk_dcw(struct s_client *cl, struct s_ecm_answer *ea)
 	}
 
 	if (ert->rc<E_99) {
+#ifdef WITH_LB
 		send_reader_stat(eardr, ert, ea, ea->rc);
-#ifdef CS_CACHEEX
-		        if (ea && ert->rc < E_NOTFOUND && ea->rc < E_NOTFOUND && memcmp(ea->cw, ert->cw, sizeof(ert->cw)) != 0) {
-		                char cw1[16*3+2], cw2[16*3+2];
-		                cs_hexdump(0, ea->cw, 16, cw1, sizeof(cw1));
-		                cs_hexdump(0, ert->cw, 16, cw2, sizeof(cw2));
-		                
-		                char ip1[20]="", ip2[20]="";
-		                if (ea->reader) cs_strncpy(ip1, cs_inet_ntoa(ea->reader->client->ip), sizeof(ip1));
-		                if (ert->cacheex_src) cs_strncpy(ip2, cs_inet_ntoa(ert->cacheex_src->ip), sizeof(ip2));
-		                else if (ert->selected_reader) cs_strncpy(ip2, cs_inet_ntoa(ert->selected_reader->client->ip), sizeof(ip2));
-		                
-		                ECM_REQUEST *er = ert;
-        			debug_ecm(D_TRACE, "WARNING2: Different CWs %s from %s(%s)<>%s(%s): %s<>%s", buf, 
-        			    username(ea->reader?ea->reader->client:cl), ip1, 
-        			    er->cacheex_src?username(er->cacheex_src):(ea->reader?ea->reader->label:"unknown/csp"), ip2,
-        			    cw1, cw2);
-                        }
 #endif
-                if (ea && ea->rc < ert->rc) { //answer too late, only cache update:
-                    memcpy(ert->cw, ea->cw, sizeof(ea->cw));
-                    ert->rc = ea->rc;
-                }
-
 		return; // already done
 	}
 
@@ -2114,16 +2844,18 @@ static void chk_dcw(struct s_client *cl, struct s_ecm_answer *ea)
 		ert->rc=E_NOTFOUND; //so we set the return code
 	}
 
+#ifdef WITH_LB
 	send_reader_stat(eardr, ert, ea, ea->rc);
+#endif
 
 #ifdef CS_CACHEEX
 	if (ea->rc < E_NOTFOUND && !ert->ecmcacheptr)
-		cacheex_cache_push(ert);
+		cs_cache_push(ert);
 #endif
 
 	if (ert->rc < E_99) {
 		if (cl) send_dcw(cl, ert);
-		if (!ert->ecmcacheptr && ert->rc != E_UNHANDLED)
+		if (!ert->ecmcacheptr)
 			distribute_ecm(ert, (ert->rc == E_FOUND)?E_CACHE2:ert->rc);
 	}
 
@@ -2183,6 +2915,45 @@ uint32_t chk_provid(uchar *ecm, uint16_t caid) {
 	return(provid);
 }
 
+#ifdef IRDETO_GUESSING
+void guess_irdeto(ECM_REQUEST *er)
+{
+  uchar  b3;
+  int32_t    b47;
+  //uint16_t chid;
+  struct s_irdeto_quess *ptr;
+
+  b3  = er->ecm[3];
+  ptr = cfg.itab[b3];
+  if( !ptr ) {
+    cs_debug_mask(D_TRACE, "unknown irdeto byte 3: %02X", b3);
+    return;
+  }
+  b47  = b2i(4, er->ecm+4);
+  //chid = b2i(2, er->ecm+6);
+  //cs_debug_mask(D_TRACE, "ecm: b47=%08X, ptr->b47=%08X, ptr->caid=%04X", b47, ptr->b47, ptr->caid);
+  while( ptr )
+  {
+    if( b47==ptr->b47 )
+    {
+      if( er->srvid && (er->srvid!=ptr->sid) )
+      {
+        cs_debug_mask(D_TRACE, "sid mismatched (ecm: %04X, guess: %04X), wrong oscam.ird file?",
+                  er->srvid, ptr->sid);
+        return;
+      }
+      er->caid=ptr->caid;
+      er->srvid=ptr->sid;
+      er->chid=(uint16_t)ptr->b47;
+//      cs_debug_mask(D_TRACE, "quess_irdeto() found caid=%04X, sid=%04X, chid=%04X",
+//               er->caid, er->srvid, er->chid);
+      return;
+    }
+    ptr=ptr->next;
+  }
+}
+#endif
+
 void convert_to_beta(struct s_client *cl, ECM_REQUEST *er, uint16_t caidto)
 {
 	static uchar headerN3[10] = {0xc7, 0x00, 0x00, 0x00, 0x01, 0x10, 0x10, 0x00, 0x87, 0x12};
@@ -2191,11 +2962,11 @@ void convert_to_beta(struct s_client *cl, ECM_REQUEST *er, uint16_t caidto)
 	er->ocaid = er->caid;
 	er->caid = caidto;
 	er->prid = 0;
-	er->ecmlen = er->ecm[2] + 3;
+	er->l = er->ecm[2] + 3;
 
-	memmove(er->ecm + 13, er->ecm + 3, er->ecmlen - 3);
+	memmove(er->ecm + 13, er->ecm + 3, er->l - 3);
 
-	if (er->ecmlen > 0x88) {
+	if (er->l > 0x88) {
 		memcpy(er->ecm + 3, headerN3, 10);
 
 		if (er->ecm[0] == 0x81)
@@ -2206,43 +2977,25 @@ void convert_to_beta(struct s_client *cl, ECM_REQUEST *er, uint16_t caidto)
 	else
 		memcpy(er->ecm + 3, headerN2, 10);
 
-	er->ecmlen += 10;
-	er->ecm[2] = er->ecmlen - 3;
+	er->l += 10;
+	er->ecm[2] = er->l - 3;
 	er->btun = 1;
 
 	cl->cwtun++;
 	cl->account->cwtun++;
 	first_client->cwtun++;
 
-	cs_debug_mask(D_TRACE, "ECM converted ocaid from 0x%04X to BetaCrypt caid 0x%04X for service id 0x%04X",
+	cs_debug_mask(D_TRACE, "ECM converted from: 0x%X to BetaCrypt: 0x%X for service id:0x%X",
 					er->ocaid, caidto, er->srvid);
 }
 
-void convert_to_nagra(struct s_client *cl, ECM_REQUEST *er, uint16_t caidto)
+uint16_t get_betatunnel_caid_to(uint16_t caid)
 {
-	cs_debug_mask(D_TRACE, "convert_to_nagra");
-	er->ocaid = er->caid;
-	er->caid = caidto;
-	er->prid = 0;
-	er->ecmlen = er->ecm[2] + 3;
-
-	//not sure
-	if (er->ecmlen < 0x52) {
-		er->ecm[1]=0x30;
-	}
-
-	memmove(er->ecm + 3, er->ecm + 13, er->ecmlen - 3);
-
-	er->ecmlen -= 10;
-	er->ecm[2] = er->ecmlen - 3;
-	er->btun = 1;
-
-	cl->cwtun++;
-	cl->account->cwtun++;
-	first_client->cwtun++;
-
-	cs_debug_mask(D_TRACE, "ECM converted ocaid from: 0x%04X to Nagra: 0x04%X for service id:0x04%X",
-					er->ocaid, caidto, er->srvid);
+	if (caid == 0x1801) return 0x1722;
+	if (caid == 0x1833) return 0x1702;
+	if (caid == 0x1834) return 0x1722;
+	if (caid == 0x1835) return 0x1722;
+	return 0;
 }
 
 void cs_betatunnel(ECM_REQUEST *er)
@@ -2255,15 +3008,12 @@ void cs_betatunnel(ECM_REQUEST *er)
 	ttab = &cl->ttab;
 
 	if (er->caid>>8 == 0x18)
-		cs_ddump_mask(D_TRACE, er->ecm, 13, "betatunnel? ecmlen=%d", er->ecmlen);
+		cs_ddump_mask(D_TRACE, er->ecm, 13, "betatunnel? ecmlen=%d", er->l);
 
 	for (n = 0; n<ttab->n; n++) {
 		if ((er->caid==ttab->bt_caidfrom[n]) && ((er->srvid==ttab->bt_srvid[n]) || (ttab->bt_srvid[n])==mask_all)) {
-			if ((er->caid == 0x1702 || er->caid == 0x1722) && er->ocaid == 0x0000){
-				convert_to_nagra(cl, er, ttab->bt_caidto[n]);
-			} else if (er->ocaid == 0x0000){
-				convert_to_beta(cl, er, ttab->bt_caidto[n]);
-			}
+
+			convert_to_beta(cl, er, ttab->bt_caidto[n]);
 
 			return;
 		}
@@ -2293,8 +3043,10 @@ static void guess_cardsystem(ECM_REQUEST *er)
       (!er->ecm[5]) && (!er->ecm[6]) && (er->ecm[7]==er->ecm[2]-5))
     last_hope=0xd00;
 
+#ifdef IRDETO_GUESSING
   if (!er->caid && er->ecm[2]==0x31 && er->ecm[0x0b]==0x28)
     guess_irdeto(er);
+#endif
 
   if (!er->caid)    // guess by len ..
     er->caid=len4caid[er->ecm[2]+3];
@@ -2310,12 +3062,11 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 	uint32_t line = 0;
 
 	er->client = client;
-	if(now - client->lastecm > cfg.hideclient_to) client->lastswitch = 0;		// user was on freetv or didn't request for some time so we reset lastswitch to get correct stats/webif display
 	client->lastecm = now;
 
 	if (client == first_client || !client ->account || client->account == first_client->account) {
 		//DVBApi+serial is allowed to request anonymous accounts:
-		int16_t lt = modules[client->ctyp].listenertype;
+		int16_t lt = ph[client->ctyp].listenertype;
 		if (lt != LIS_DVBAPI && lt != LIS_SERIAL) {
 			er->rc = E_INVALID;
 			er->rcEx = E2_GLOBAL;
@@ -2323,10 +3074,10 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 		}
 	}
 
-	if (er->ecmlen > MAX_ECM_SIZE) {
+	if (er->l > MAX_ECM_SIZE) {
 		er->rc = E_INVALID;
 		er->rcEx = E2_GLOBAL;
-		snprintf(er->msglog, sizeof(er->msglog), "ECM size %d > Max Ecm size %d, ignored! client %s", er->ecmlen, MAX_ECM_SIZE, username(client));
+		snprintf(er->msglog, sizeof(er->msglog), "ECM size %d > Max Ecm size %d, ignored! client %s", er->l, MAX_ECM_SIZE, username(client));
 	}
 
 	if (!client->grp) {
@@ -2343,10 +3094,6 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 	update_chid(er);
 
 	// quickfix for 0100:000065
-	if (er->caid == 0x100 && er->prid == 0x00006a){ // cds nl add fix so mismatch between ecm and secatype reader wont set channel on sid blacklist 
-		er->chid = b2i(2, er->ecm+7); // not quite right but good enough to function, its also registered this way in module-stat 
-	}
-	
 	if (er->caid == 0x100 && er->prid == 0x65 && er->srvid == 0)
 		er->srvid = 0x0642;
 
@@ -2360,26 +3107,8 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 		er->prid = 0x030600;
 
 	//betacrypt ecm with nagra header
-	if ((er->caid == 0x1702 || er->caid == 0x1722) && (er->ecmlen == 0x89 || er->ecmlen == 0x4A) && er->ecm[3] == 0x07 && (er->ecm[4] == 0x84 || er->ecm[4] == 0x45)){
-		//cs_debug_mask(D_TRACE, "Quickfix remap beta->nagra: 0x%X, 0x%X, 0x%X, 0x%X", er->caid, er->ecmlen, er->ecm[3], er->ecm[4]);
-		if (er->caid == 0x1702) {
-			er->caid = 0x1833;
-		} else {
-			check_lb_auto_betatunnel_mode(er);
-		}
-		cs_debug_mask(D_TRACE, "Quickfix remap beta->nagra: 0x%X, 0x%X, 0x%X, 0x%X", er->caid, er->ecmlen, er->ecm[3], er->ecm[4]);
-	}
-
-	//nagra ecm with betacrypt header 1801, 1833, 1834, 1835
-	if ((er->caid == 0x1801 || er->caid == 0x1833 || er->caid == 0x1834 || er->caid == 0x1835) && (er->ecmlen == 0x93 || er->ecmlen == 0x54) && er->ecm[13] == 0x07 && (er->ecm[14] == 0x84 || er->ecm[14] == 0x45)){
-		//cs_debug_mask(D_TRACE, "Quickfix remap nagra->beta: 0x%X, 0x%X, 0x%X, 0x%X", er->caid, er->ecmlen, er->ecm[13], er->ecm[44]);
-		if (er->caid == 0x1833) {
-			er->caid = 0x1702;
-		} else {
-			er->caid = 0x1722;
-		}
-		cs_debug_mask(D_TRACE, "Quickfix remap nagra->beta: 0x%X, 0x%X, 0x%X, 0x%X", er->caid, er->ecmlen, er->ecm[13], er->ecm[44]);
-	}
+	if (er->caid == 0x1702 && er->l == 0x89 && er->ecm[3] == 0x07 && er->ecm[4] == 0x84)
+		er->caid = 0x1833;
 
 	//Ariva quickfix (invalid nagra provider)
 	if (((er->caid & 0xFF00) == 0x1800) && er->prid > 0x00FFFF) er->prid=0;
@@ -2494,7 +3223,7 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 					if (!chk_bcaid(er, &client->ctab)) {
 						er->rc = E_INVALID;
 						er->rcEx = E2_CAID;
-						snprintf( er->msglog, MSGLOGSIZE, "invalid caid 0x%04X", er->caid );
+						snprintf( er->msglog, MSGLOGSIZE, "invalid caid %x",er->caid );
 						}
 					break;
 
@@ -2516,16 +3245,16 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 
 				case 4:
 					// invalid (sfilter)
-					if (!chk_sfilter(er, modules[client->ctyp].ptab))
+					if (!chk_sfilter(er, ph[client->ctyp].ptab))
 						er->rc = E_INVALID;
 					break;
 
 				case 5:
 					// corrupt
-					if( (i = er->ecmlen - ecm_len) ) {
+					if( (i = er->l - ecm_len) ) {
 						if (i > 0) {
-							cs_debug_mask(D_TRACE, "warning: ecm size adjusted from %d to %d", er->ecmlen, ecm_len);
-							er->ecmlen = ecm_len;
+							cs_debug_mask(D_TRACE, "warning: ecm size adjusted from 0x%X to 0x%X", er->l, ecm_len);
+							er->l = ecm_len;
 						}
 						else
 							er->rc = E_CORRUPT;
@@ -2552,12 +3281,21 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 			offset = 13;
 		unsigned char md5tmp[MD5_DIGEST_LENGTH];
 		// store ECM in cache
-		memcpy(er->ecmd5, MD5(er->ecm + offset, er->ecmlen - offset, md5tmp), CS_ECMSTORESIZE);
-		cacheex_update_hash(er);
+		memcpy(er->ecmd5, MD5(er->ecm+offset, er->l-offset, md5tmp), CS_ECMSTORESIZE);
+#ifdef CS_CACHEEX
+		er->csp_hash = csp_ecm_hash(er);
+#endif
+
+#ifdef CS_ANTICASC
 		ac_chk(client, er, 0);
+#endif
 	}
 	struct s_ecm_answer *ea, *prv = NULL;
-	if(er->rc >= E_99 && !cacheex_is_match_alias(client, er)) {
+#ifdef CS_CACHEEX
+	if(er->rc >= E_99 && !is_match_alias(client, er)) {
+#else
+	if(er->rc >= E_99) {
+#endif
 		er->reader_avail=0;
 		struct s_reader *rdr;
 
@@ -2565,7 +3303,7 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 		cs_readlock(&clientlist_lock);
 
 		for (rdr=first_active_reader; rdr ; rdr=rdr->next) {
-			int8_t match = matching_reader(er, rdr, 1); // include ratelimitercheck
+			int8_t match = matching_reader(er, rdr);
 #ifdef WITH_LB
 			//if this reader does not match, check betatunnel for it
 			if (!match && cfg.lb_auto_betatunnel) {
@@ -2573,14 +3311,13 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 				if (caid) {
 					uint16_t save_caid = er->caid;
 					er->caid = caid;
-					match = matching_reader(er, rdr, 1); //matching (including ratelimitercheck)
+					match = matching_reader(er, rdr); //matching
 					er->caid = save_caid;
 				}
 			}
 #endif
 			if (match) {
-				if (!cs_malloc(&ea, sizeof(struct s_ecm_answer)))
-					break;
+				cs_malloc(&ea, sizeof(struct s_ecm_answer), 0);
 				ea->reader = rdr;
 				if (prv)
 					prv->next = ea;
@@ -2590,10 +3327,12 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 				prv = ea;
 
 				ea->status = READER_ACTIVE;
-				if (!is_network_reader(rdr))
+				if (!(rdr->typ & R_IS_NETWORK))
 					ea->status |= READER_LOCAL;
-				else if (cacheex_reader(rdr))
+#ifdef CS_CACHEEX
+				else if (rdr->cacheex == 1)
 					ea->status |= READER_CACHEEX;
+#endif
 				if (rdr->fallback)
 					ea->status |= READER_FALLBACK;
 
@@ -2609,7 +3348,12 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 		cs_readunlock(&clientlist_lock);
 		cs_readunlock(&readerlist_lock);
 
-		stat_get_best_reader(er);
+#ifdef WITH_LB
+		if (cfg.lb_mode && er->reader_avail) {
+			debug_ecm(D_TRACE, "requesting client %s best reader for %s", username(client), buf);
+			get_best_reader(er);
+		}
+#endif
 
 		int32_t fallback_reader_count = 0;
 		er->reader_count = 0;
@@ -2646,11 +3390,12 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 #ifdef CS_CACHEEX
 				//to support cache without ecms we store the first client ecm request here
 				//when we got a cache ecm from cacheex
-				if (!ecm->ecmlen && er->ecmlen && !ecm->matching_rdr) {
+				if (!ecm->l && er->l && !ecm->matching_rdr) {
 					ecm->matching_rdr = er->matching_rdr;
 					er->matching_rdr = NULL;
-					ecm->ecmlen = er->ecmlen;
+					ecm->l = er->l;
 					ecm->client = er->client;
+					ecm->checksum = er->checksum;
 					er->client = NULL;
 					memcpy(ecm->ecm, er->ecm, sizeof(ecm->ecm));
 					memcpy(ecm->ecmd5, er->ecmd5, sizeof(ecm->ecmd5));
@@ -2665,11 +3410,10 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 	}
 
 #ifdef CS_CACHEEX
-	int8_t cacheex = client->account?client->account->cacheex.mode:0;
-	uint32_t c_csp_wait_time = get_csp_wait_time(er,client);
-	cs_debug_mask(D_CACHEEX | D_CSPCWC, "[GET_CW] c_csp_wait_time %d caid %04X prov %06X srvid %04X rc %d cacheex %d", c_csp_wait_time, er->caid, er->prid, er->srvid, er->rc, cacheex);
-	if ((cacheex == 1 || c_csp_wait_time) && er->rc == E_UNHANDLED) { //not found in cache, so wait!
-		int32_t max_wait = (cacheex == 1)?cfg.cacheex_wait_time:c_csp_wait_time; // uint32_t can't value <> n/50
+	int8_t cacheex = client->account?client->account->cacheex:0;
+
+	if ((cacheex == 1 || cfg.csp_wait_time) && er->rc == E_UNHANDLED) { //not found in cache, so wait!
+		uint32_t max_wait = (cacheex == 1)?cfg.cacheex_wait_time:cfg.csp_wait_time;
 		while (max_wait > 0 && !client->kill) {
 			cs_sleepms(50);
 			max_wait -= 50;
@@ -2687,8 +3431,6 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 				break;
 			}
 		}
-		if (max_wait <= 0 )
-			cs_debug_mask(D_CACHEEX|D_CSPCWC, "[GET_CW] wait_time over");
 	}
 #endif
 
@@ -2696,25 +3438,30 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 #ifdef CS_CACHEEX
 		if (cacheex != 1 || er->rc == E_99) { //Cacheex should not add to the ecmcache:
 #endif
-			if (er->rc == E_UNHANDLED) {
-				ecm = check_cwcache(er, client);
-				if (ecm && ecm != er) {
-					er->rc = E_99;
-					er->ecmcacheptr = ecm; //Linking ecm to first request
-#ifdef CS_CACHEEX
-					er->cacheex_src = ecm->cacheex_src;
-#endif
-				}
-			}
 			cs_writelock(&ecmcache_lock);
 			er->next = ecmcwcache;
 			ecmcwcache = er;
 			ecmcwcache_size++;
 			cs_writeunlock(&ecmcache_lock);
+
+			if (er->rc == E_UNHANDLED) {
+				ecm = check_cwcache(er, client);
+				if (ecm && ecm != er) {
+					er->rc = E_99;
+					er->ecmcacheptr = ecm;
+#ifdef CS_CACHEEX
+					er->cacheex_src = ecm->cacheex_src;
+#endif
+				}
+			}
 #ifdef CS_CACHEEX
 		}
 #endif
 	}
+
+	uint16_t *lp;
+	for (lp=(uint16_t *)er->ecm+(er->l>>2), er->checksum=0; lp>=(uint16_t *)er->ecm; lp--)
+		er->checksum^=*lp;
 
 	if (er->rc < E_99) {
 #ifdef CS_CACHEEX
@@ -2722,7 +3469,7 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 			cs_sleepms(cfg.delay);
 
 		if (cacheex == 1 && er->rc < E_NOTFOUND) {
-			cacheex_add_stats(client, er->caid, er->srvid, er->prid, 0);
+			cs_add_cacheex_stats(client, er->caid, er->srvid, er->prid, 0);
 			client->cwcacheexpush++;
 			if (client->account)
 				client->account->cwcacheexpush++;
@@ -2760,17 +3507,16 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
 	}
 #endif
 
-	lb_mark_last_reader(er);
-
+#ifdef WITH_LB
+        lb_mark_last_reader(er);
+#endif
 	er->rcEx = 0;
 	request_cw(er);
 
 #ifdef WITH_DEBUG
-	if (D_CLIENTECM & cs_dblevel) {
-		char buf[ECM_FMT_LEN];
-		format_ecm(er, buf, ECM_FMT_LEN);
-		cs_ddump_mask(D_CLIENTECM, er->ecm, er->ecmlen, "Client %s ECM dump %s", username(client), buf);
-  }
+	char buf[ECM_FMT_LEN];
+	format_ecm(er, buf, ECM_FMT_LEN);
+	cs_ddump_mask(D_CLIENTECM, er->ecm, er->l, "Client %s ECM dump %s", username(client), buf);
 #endif
 
 	if(timecheck_client){
@@ -2785,7 +3531,7 @@ void get_cw(struct s_client * client, ECM_REQUEST *er)
  * Function to filter emm by cardsystem.
  * Every cardsystem can export a function "get_emm_filter"
  *
- * the emm is checked against it an returns 1 for a valid emm or 0 if not
+ * the emm is checked against it an returns TRUE for a valid emm or FALSE if not
  */
 int8_t do_simple_emm_filter(struct s_reader *rdr, struct s_cardsystem *cs, EMM_PACKET *ep)
 {
@@ -2836,7 +3582,7 @@ int8_t do_simple_emm_filter(struct s_reader *rdr, struct s_cardsystem *cs, EMM_P
 			continue;
 
                 match = 1;
-		for (i=0,k=0; i<10 && k < ep->emmlen && match; i++,k++) {
+		for (i=0,k=0; i<10 && k<ep->l && match; i++,k++) {
 			flt = dmx_filter[startpos+2+i];
 			mask = dmx_filter[startpos+2+16+i];
 			if (!mask) break;
@@ -2854,10 +3600,9 @@ void do_emm(struct s_client * client, EMM_PACKET *ep)
 {
 	char *typtext[]={"unknown", "unique", "shared", "global"};
 	char tmp[17];
-	int32_t emmnok=0;
 
 	struct s_reader *aureader = NULL;
-	cs_ddump_mask(D_EMM, ep->emm, ep->emmlen, "emm:");
+	cs_ddump_mask(D_EMM, ep->emm, ep->l, "emm:");
 
 	LL_ITER itr = ll_iter_create(client->aureader_list);
 	while ((aureader = ll_iter_next(&itr))) {
@@ -2892,7 +3637,7 @@ void do_emm(struct s_client * client, EMM_PACKET *ep)
 
 		struct s_cardsystem *cs = NULL;
 
-		if (is_cascading_reader(aureader)) { // network reader (R_CAMD35 R_NEWCAMD R_CS378X R_CCCAM)
+		if (aureader->typ & R_IS_CASCADING) { // network reader (R_CAMD35 R_NEWCAMD R_CS378X R_CCCAM)
 			if (!aureader->ph.c_send_emm) // no emm support
 				continue;
 
@@ -2909,7 +3654,10 @@ void do_emm(struct s_client * client, EMM_PACKET *ep)
 		if (cs && cs->get_emm_type) {
 			if(!cs->get_emm_type(ep, aureader)) {
 				rdr_debug_mask(aureader, D_EMM, "emm skipped, get_emm_type() returns error");
-				emmnok++;
+				client->emmnok++;
+				if (client->account)
+					client->account->emmnok++;
+				first_client->emmnok++;
 				continue;
 			}
 		}
@@ -2917,7 +3665,10 @@ void do_emm(struct s_client * client, EMM_PACKET *ep)
 		if (cs && cs->get_emm_filter) {
 			if (!do_simple_emm_filter(aureader, cs, ep)) {
 				rdr_debug_mask(aureader, D_EMM, "emm skipped, emm_filter() returns invalid");
-				emmnok++;
+				client->emmnok++;
+				if (client->account)
+					client->account->emmnok++;
+				first_client->emmnok++;
 				continue;
 			}
 		}
@@ -2944,11 +3695,11 @@ void do_emm(struct s_client * client, EMM_PACKET *ep)
 			int32_t emm_length = ((ep->emm[1] & 0x0f) << 8) | ep->emm[2];
 			char buf[80];
 			strftime (buf, sizeof(buf), "%Y/%m/%d %H:%M:%S", &timeinfo);
-			snprintf (token, sizeof(token), "%s/%s_emm.log", cfg.emmlogdir?cfg.emmlogdir:cs_confdir, aureader->label);
+			snprintf (token, sizeof(token), "%s%s_emm.log", cfg.emmlogdir?cfg.emmlogdir:cs_confdir, aureader->label);
 
 			if (!(fp = fopen (token, "a"))) {
 				cs_log ("ERROR: Cannot open file '%s' (errno=%d: %s)\n", token, errno, strerror(errno));
-			} else if (cs_malloc(&tmp2, (emm_length + 3) * 2 + 1)) {
+			} else if(cs_malloc(&tmp2, (emm_length + 3)*2 + 1, -1)){
 				fprintf (fp, "%s   %s   ", buf, cs_hexdump(0, ep->hexserial, 8, tmp, sizeof(tmp)));
 				fprintf (fp, "%s\n", cs_hexdump(0, ep->emm, emm_length + 3, tmp2, (emm_length + 3)*2 + 1));
 				free(tmp2);
@@ -2956,7 +3707,7 @@ void do_emm(struct s_client * client, EMM_PACKET *ep)
 				cs_log ("Successfully added EMM to %s.", token);
 			}
 
-			snprintf (token, sizeof(token), "%s/%s_emm.bin", cfg.emmlogdir?cfg.emmlogdir:cs_confdir, aureader->label);
+			snprintf (token, sizeof(token), "%s%s_emm.bin", cfg.emmlogdir?cfg.emmlogdir:cs_confdir, aureader->label);
 			if (!(fp = fopen (token, "ab"))) {
 				cs_log ("ERROR: Cannot open file '%s' (errno=%d: %s)\n", token, errno, strerror(errno));
 			} else {
@@ -3028,18 +3779,11 @@ void do_emm(struct s_client * client, EMM_PACKET *ep)
 			}
 		}
 
-		EMM_PACKET *emm_pack;
-		if (cs_malloc(&emm_pack, sizeof(EMM_PACKET))) {
-			rdr_debug_mask(aureader, D_EMM, "emm is being sent to reader");
-			memcpy(emm_pack, ep, sizeof(EMM_PACKET));
-			add_job(aureader->client, ACTION_READER_EMM, emm_pack, sizeof(EMM_PACKET));
-		}
-	}
-	if (emmnok > 0 && emmnok == ll_count(client->aureader_list)) {
-		client->emmnok++;
-		if (client->account)
-			client->account->emmnok++;
-		first_client->emmnok++;
+		rdr_debug_mask(aureader, D_EMM, "emm is being sent to reader");
+
+		EMM_PACKET *emm_pack = cs_malloc(&emm_pack, sizeof(EMM_PACKET), -1);
+		memcpy(emm_pack, ep, sizeof(EMM_PACKET));
+		add_job(aureader->client, ACTION_READER_EMM, emm_pack, sizeof(EMM_PACKET));
 	}
 }
 
@@ -3083,7 +3827,7 @@ int32_t process_input(uchar *buf, int32_t l, int32_t timeout)
 				continue;
 
 			if (pfd[i].fd == cl->pfd)
-				return modules[cl->ctyp].recv(cl, buf, l);
+				return ph[cl->ctyp].recv(cl, buf, l);
 		}
 	}
 	return(rc);
@@ -3100,7 +3844,7 @@ void cs_waitforcardinit(void)
 			struct s_reader *rdr;
 			LL_ITER itr = ll_iter_create(configured_readers);
 			while((rdr = ll_iter_next(&itr))) {
-				if (rdr->enable && !is_cascading_reader(rdr) && (rdr->card_status == CARD_NEED_INIT || rdr->card_status == UNKNOWN)) {
+				if (rdr->enable && (!(rdr->typ & R_IS_CASCADING)) && (rdr->card_status == CARD_NEED_INIT || rdr->card_status == UNKNOWN)) {
 					card_init_done = 0;
 					break;
 				}
@@ -3117,38 +3861,56 @@ void cs_waitforcardinit(void)
 }
 
 static void check_status(struct s_client *cl) {
-	if (!cl || cl->kill || !cl->init_done)
+	if (!cl || cl->kill || !cl->init_done )
 		return;
+
+	struct s_reader *rdr = cl->reader;
+	if (rdr) {
+	    //check for valid reader:
+	    struct s_reader *r;
+	    for (r=first_active_reader; r; r=r->next)
+	        if (r==rdr) break;
+            if (!r) return; //reader is restarting at this moment
+	}
 
 	switch (cl->typ) {
 		case 'm':
 		case 'c':
 			//check clients for exceeding cmaxidle by checking cl->last
-			if (!(cl->ncd_keepalive && (modules[cl->ctyp].listenertype & LIS_NEWCAMD))  && cl->last && cfg.cmaxidle && (time(NULL) - cl->last) > (time_t)cfg.cmaxidle) {
+			if (!(cl->ncd_keepalive && (ph[cl->ctyp].listenertype & LIS_NEWCAMD))  && cl->last && cfg.cmaxidle && (time(NULL) - cl->last) > (time_t)cfg.cmaxidle) {
 				add_job(cl, ACTION_CLIENT_IDLE, NULL, 0);
 			}
 
 			break;
+#ifdef WITH_CARDREADER
 		case 'r':
-			cardreader_checkhealth(cl, cl->reader);
+			//check for card inserted or card removed on pysical reader
+			if (!rdr || !rdr->enable)
+				break;
+			reader_checkhealth(rdr);
+//			add_job(cl, ACTION_READER_CHECK_HEALTH, NULL, 0);
 			break;
+#endif
 		case 'p':
-			{
-				struct s_reader *rdr = cl->reader;
-				if (!rdr || !rdr->enable || !rdr->active)	//reader is disabled or restarting at this moment
-					break;
-				//execute reader do idle on proxy reader after a certain time (rdr->tcp_ito = inactivitytimeout)
-				//disconnect when no keepalive available
-				if ((rdr->tcp_ito && is_cascading_reader(rdr)) || rdr->typ == R_CCCAM) {
-					time_t now = time(NULL);
-					int32_t time_diff = abs(now - rdr->last_check);
-	
-					if (time_diff > 60 || (time_diff > 30 && rdr->typ == R_CCCAM)) { //check 1x per minute or every 30s for cccam
-						add_job(rdr->client, ACTION_READER_IDLE, NULL, 0);
-						rdr->last_check = now;
-					}
+			//execute reader do idle on proxy reader after a certain time (rdr->tcp_ito = inactivitytimeout)
+			//disconnect when no keepalive available
+			if (!rdr || !rdr->enable)
+				break;
+			if (rdr->tcp_ito && (rdr->typ & R_IS_CASCADING)) {
+				int32_t time_diff;
+				time_diff = abs(time(NULL) - rdr->last_check);
+
+				if (time_diff>60) { //check 1x per minute
+					add_job(rdr->client, ACTION_READER_IDLE, NULL, 0);
+					rdr->last_check = time(NULL);
 				}
 			}
+			if (((time(NULL) - rdr->last_check) > 30) && rdr->typ == R_CCCAM) {
+				add_job(rdr->client, ACTION_READER_IDLE, NULL, 0);
+				rdr->last_check = time(NULL);
+			}
+			break;
+		default:
 			break;
 	}
 }
@@ -3165,11 +3927,9 @@ void * work_thread(void *ptr) {
 	cl->thread=pthread_self();
 	cl->thread_active = 1;
 
-	uint16_t bufsize = modules[cl->ctyp].bufsize; //CCCam needs more than 1024bytes!
+	uint16_t bufsize = ph[cl->ctyp].bufsize; //CCCam needs more than 1024bytes!
 	if (!bufsize) bufsize = 1024;
-	uchar *mbuf;
-	if (!cs_malloc(&mbuf, bufsize))
-		return NULL;
+	uchar *mbuf = cs_malloc(&mbuf, bufsize, 0);
 	int32_t n=0, rc=0, i, idx, s;
 	uchar dcw[16];
 	time_t now;
@@ -3208,7 +3968,7 @@ void * work_thread(void *ptr) {
 			if (!data) {
 	            /* for serial client cl->pfd is file descriptor for serial port not socket
 	               for example: pfd=open("/dev/ttyUSB0"); */
-				if (!cl->pfd || modules[cl->ctyp].listenertype == LIS_SERIAL)
+				if (!cl->pfd || ph[cl->ctyp].listenertype == LIS_SERIAL)
 					break;
 				pfd[0].fd = cl->pfd;
 				pfd[0].events = POLLIN | POLLPRI | POLLHUP;
@@ -3222,9 +3982,10 @@ void * work_thread(void *ptr) {
 				pthread_mutex_unlock(&cl->thread_lock);
 
 				if (rc == -1)
-					cs_debug_mask(D_TRACE, "poll() timeout");
+					cs_debug_mask(D_TRACE, "poll wakeup");
 
 				if (rc>0) {
+					cs_debug_mask(D_TRACE, "data on socket");
 					data=&tmp_data;
 					data->ptr = NULL;
 
@@ -3259,7 +4020,7 @@ void * work_thread(void *ptr) {
 			now = time(NULL);
 			time_t diff = (time_t)(cfg.ctimeout/1000)+1;
 			if (data != &tmp_data && data->time < now-diff) {
-				cs_debug_mask(D_TRACE, "dropping client data for %s time %ds", username(cl), (int32_t)(now-data->time));
+				cs_log("dropping client data for %s time %ds", username(cl), (int32_t)(now-data->time));
 				free_data(data);
 				data = NULL;
 				continue;
@@ -3306,10 +4067,12 @@ void * work_thread(void *ptr) {
 					break;
 				case ACTION_READER_REMOTELOG:
 					casc_do_sock_log(reader);
-					break;
+	 				break;
+	#ifdef WITH_CARDREADER
 				case ACTION_READER_RESET:
-					cardreader_do_reset(reader);
-					break;
+			 		reader_reset(reader);
+	 				break;
+	#endif
 				case ACTION_READER_ECM_REQUEST:
 					reader_get_ecm(reader, data->ptr);
 					break;
@@ -3327,17 +4090,19 @@ void * work_thread(void *ptr) {
 					cl->kill = 1;
 					restart_reader = 1;
 					break;
+#ifdef WITH_CARDREADER
 				case ACTION_READER_RESET_FAST:
 					reader->card_status = CARD_NEED_INIT;
-					cardreader_do_reset(reader);
+					reader_reset(reader);
 					break;
 				case ACTION_READER_CHECK_HEALTH:
-					cardreader_do_checkhealth(reader);
+					reader_checkhealth(reader);
 					break;
+#endif
 				case ACTION_CLIENT_UDP:
-					n = modules[cl->ctyp].recv(cl, data->ptr, data->len);
+					n = ph[cl->ctyp].recv(cl, data->ptr, data->len);
 					if (n<0) break;
-					modules[cl->ctyp].s_handler(cl, data->ptr, n);
+					ph[cl->ctyp].s_handler(cl, data->ptr, n);
 					break;
 				case ACTION_CLIENT_TCP:
 					s = check_fd_for_data(cl->pfd);
@@ -3348,25 +4113,25 @@ void * work_thread(void *ptr) {
 						continue;
 					}
 
-					n = modules[cl->ctyp].recv(cl, mbuf, bufsize);
+					n = ph[cl->ctyp].recv(cl, mbuf, bufsize);
 					if (n < 0) {
 						cl->kill=1; // kill client on next run
 						continue;
 					}
-					modules[cl->ctyp].s_handler(cl, mbuf, n);
+					ph[cl->ctyp].s_handler(cl, mbuf, n);
 
 					break;
 				case ACTION_CLIENT_ECM_ANSWER:
 					chk_dcw(cl, data->ptr);
 					break;
 				case ACTION_CLIENT_INIT:
-					if (modules[cl->ctyp].s_init)
-						modules[cl->ctyp].s_init(cl);
+					if (ph[cl->ctyp].s_init)
+						ph[cl->ctyp].s_init(cl);
 					cl->init_done=1;
 					break;
 				case ACTION_CLIENT_IDLE:
-					if (modules[cl->ctyp].s_idle)
-						modules[cl->ctyp].s_idle(cl);
+					if (ph[cl->ctyp].s_idle)
+						ph[cl->ctyp].s_idle(cl);
 					else {
 						cs_log("user %s reached %d sec idle limit.", username(cl), cfg.cmaxidle);
 						cl->kill = 1;
@@ -3375,19 +4140,15 @@ void * work_thread(void *ptr) {
 #ifdef CS_CACHEEX
 				case ACTION_CACHE_PUSH_OUT: {
 					ECM_REQUEST *er = data->ptr;
-					int32_t res=0, stats = -1;
 
-					// cc-nodeid-list-check
+					int32_t res=0, stats = -1;
 					if (reader) {
-						if (reader->ph.c_cache_push_chk && !reader->ph.c_cache_push_chk(cl, er))
-							break;
 						res = reader->ph.c_cache_push(cl, er);
-						stats = cacheex_add_stats(cl, er->caid, er->srvid, er->prid, 0);
-					} else  {
-						if (modules[cl->ctyp].c_cache_push_chk && !modules[cl->ctyp].c_cache_push_chk(cl, er))
-							break;
-						res = modules[cl->ctyp].c_cache_push(cl, er);
+						stats = cs_add_cacheex_stats(cl, er->caid, er->srvid, er->prid, 0);
 					}
+					else
+						res = ph[cl->ctyp].c_cache_push(cl, er);
+
 					debug_ecm(D_CACHEEX, "pushed ECM %s to %s res %d stats %d", buf, username(cl), res, stats);
 
 					cl->cwcacheexpush++;
@@ -3435,17 +4196,17 @@ void * work_thread(void *ptr) {
  * if ptr should be free() after use, set len to the size
  * else set size to 0
 **/
-int32_t add_job(struct s_client *cl, int8_t action, void *ptr, int32_t len) {
+void add_job(struct s_client *cl, int8_t action, void *ptr, int32_t len) {
 
 	if (!cl || cl->kill) {
 		if (!cl) cs_log("WARNING: add_job failed."); //Ignore jobs for killed clients
 		if (len && ptr) free(ptr);
-		return 0;
+		return;
 	}
 	
 	//Avoid full running queues:
-	if (action == ACTION_CACHE_PUSH_OUT && ll_count(cl->joblist) > 2000) {
-                cs_debug_mask(D_TRACE, "WARNING: job queue %s %s has more than 2000 jobs! count=%d, dropped!",
+	if (action == ACTION_CACHE_PUSH_OUT && ll_count(cl->joblist) > 20) {
+                cs_debug_mask(D_TRACE, "WARNING: job queue %s %s has more than 20 jobs! count=%d, dropped!", 
                     cl->typ=='c'?"client":"reader",
                     username(cl),
                     ll_count(cl->joblist));
@@ -3461,14 +4222,13 @@ int32_t add_job(struct s_client *cl, int8_t action, void *ptr, int32_t len) {
                     }
                 }
                 pthread_mutex_unlock(&cl->thread_lock);
-                return 0;                
+                return;                
 	}
 	
-	struct s_data *data;
-	if (!cs_malloc(&data, sizeof(struct s_data))) {
-		if (len && ptr)
-			free(ptr);
-		return 0;
+	struct s_data *data = cs_malloc(&data, sizeof(struct s_data), -1);
+	if (!data && len && ptr) {
+		free(ptr);
+		return;
 	}
 
 	data->action = action;
@@ -3487,7 +4247,7 @@ int32_t add_job(struct s_client *cl, int8_t action, void *ptr, int32_t len) {
 			pthread_kill(cl->thread, OSCAM_SIGNAL_WAKEUP);
 		pthread_mutex_unlock(&cl->thread_lock);
 		cs_debug_mask(D_TRACE, "add %s job action %d queue length %d %s", action > ACTION_CLIENT_FIRST ? "client" : "reader", action, ll_count(cl->joblist), username(cl));
-		return 1;
+		return;
 	}
 
 
@@ -3512,22 +4272,15 @@ int32_t add_job(struct s_client *cl, int8_t action, void *ptr, int32_t len) {
 
 	cl->thread_active = 1;
 	pthread_mutex_unlock(&cl->thread_lock);
-	return 1;
 }
-
-static uint32_t auto_timeout(ECM_REQUEST *er, uint32_t timeout) {
-        (void)er; // Prevent warning about unused er, when WITH_LB is disabled
-#ifdef WITH_LB
-        if (cfg.lb_auto_timeout)
-                return lb_auto_timeout(er, timeout);
-#endif
-        return timeout;
-}
-
 
 static void * check_thread(void) {
 	int32_t time_to_check, next_check, ecmc_next, msec_wait = 3000;
 	struct timeb t_now, tbc, ecmc_time;
+#ifdef CS_ANTICASC
+	int32_t ac_next;
+	struct timeb ac_time;
+#endif
 	ECM_REQUEST *er = NULL;
 	time_t ecm_timeout;
 	time_t ecm_mintimeout;
@@ -3542,8 +4295,6 @@ static void * check_thread(void) {
 	timecheck_client = cl;
 
 #ifdef CS_ANTICASC
-	int32_t ac_next;
-	struct timeb ac_time;
 	cs_ftime(&ac_time);
 	add_ms_to_timeb(&ac_time, cfg.ac_stime*60*1000);
 #endif
@@ -3573,14 +4324,14 @@ static void * check_thread(void) {
 		cs_readlock(&ecmcache_lock);
 
 		for (er = ecmcwcache; er; er = er->next) {
-			if (er->rc < E_99 || !er->ecmlen || !er->matching_rdr) //ignore CACHEEX pending ECMs
+			if (er->rc < E_99 || !er->l || !er->matching_rdr) //ignore CACHEEX pending ECMs
 				continue;
 
 			tbc = er->tps;
 #ifdef CS_CACHEEX
-			time_to_check = add_ms_to_timeb(&tbc, (er->stage < 2) ? cfg.cacheex_wait_time:((er->stage < 4) ? auto_timeout(er, cfg.ftimeout) : auto_timeout(er, cfg.ctimeout)));
+			time_to_check = add_ms_to_timeb(&tbc, (er->stage < 2) ? cfg.cacheex_wait_time:((er->stage < 4) ? cfg.ftimeout : cfg.ctimeout));
 #else
-			time_to_check = add_ms_to_timeb(&tbc, ((er->stage < 4) ? auto_timeout(er, cfg.ftimeout) : auto_timeout(er, cfg.ctimeout)));
+			time_to_check = add_ms_to_timeb(&tbc, ((er->stage < 4) ? cfg.ftimeout : cfg.ctimeout));
 #endif
 
 			if (comp_timeb(&t_now, &tbc) >= 0) {
@@ -3591,7 +4342,7 @@ static void * check_thread(void) {
 						request_cw(er);
 
 					tbc = er->tps;
-					time_to_check = add_ms_to_timeb(&tbc, auto_timeout(er, cfg.ctimeout));
+					time_to_check = add_ms_to_timeb(&tbc, cfg.ctimeout);
 				} else {
 					if (er->client) {
 					        er->selected_reader = NULL;
@@ -3673,8 +4424,6 @@ static void * check_thread(void) {
 
 		if (!msec_wait)
 			msec_wait = 3000;
-
-		cleanup_hitcache();
 	}
 	add_garbage(cl);
 	timecheck_client = NULL;
@@ -3683,15 +4432,8 @@ static void * check_thread(void) {
 
 static uint32_t resize_pfd_cllist(struct pollfd **pfd, struct s_client ***cl_list, uint32_t old_size, uint32_t new_size) {
 	if (old_size != new_size) {
-		struct pollfd *pfd_new;
-		if (!cs_malloc(&pfd_new, new_size * sizeof(struct pollfd))) {
-			return old_size;
-		}
-		struct s_client **cl_list_new;
-		if (!cs_malloc(&cl_list_new, new_size * sizeof(cl_list))) {
-			free(pfd_new);
-			return old_size;
-		}
+		struct pollfd *pfd_new = cs_malloc(&pfd_new, new_size*sizeof(struct pollfd), 0);
+		struct s_client **cl_list_new = cs_malloc(&cl_list_new, new_size*sizeof(cl_list), 0);
 		if (old_size > 0) {
 			memcpy(pfd_new, *pfd, old_size*sizeof(struct pollfd));
 			memcpy(cl_list_new, *cl_list, old_size*sizeof(cl_list));
@@ -3767,12 +4509,12 @@ void * client_check(void) {
 
 		//server (new tcp connections or udp messages)
 		for (k=0; k < CS_MAX_MOD; k++) {
-			if ( (modules[k].type & MOD_CONN_NET) && modules[k].ptab ) {
-				for (j=0; j<modules[k].ptab->nports; j++) {
-					if (modules[k].ptab->ports[j].fd) {
+			if ( (ph[k].type & MOD_CONN_NET) && ph[k].ptab ) {
+				for (j=0; j<ph[k].ptab->nports; j++) {
+					if (ph[k].ptab->ports[j].fd) {
 						cl_size = chk_resize_cllist(&pfd, &cl_list, cl_size, pfdcount);
 						cl_list[pfdcount] = NULL;
-						pfd[pfdcount].fd = modules[k].ptab->ports[j].fd;
+						pfd[pfdcount].fd = ph[k].ptab->ports[j].fd;
 						pfd[pfdcount++].events = POLLIN | POLLPRI | POLLHUP;
 
 					}
@@ -3844,14 +4586,14 @@ void * client_check(void) {
 			// new connection on a tcp listen socket or new message on udp listen socket
 			if (!cl && (pfd[i].revents & (POLLIN | POLLPRI))) {
 				for (k=0; k<CS_MAX_MOD; k++) {
-					if( (modules[k].type & MOD_CONN_NET) && modules[k].ptab ) {
-						for ( j=0; j<modules[k].ptab->nports; j++ ) {
-							if ( modules[k].ptab->ports[j].fd && pfd[i].fd == modules[k].ptab->ports[j].fd ) {
+					if( (ph[k].type & MOD_CONN_NET) && ph[k].ptab ) {
+						for ( j=0; j<ph[k].ptab->nports; j++ ) {
+							if ( ph[k].ptab->ports[j].fd && pfd[i].fd == ph[k].ptab->ports[j].fd ) {
 								accept_connection(k,j);
 							}
 						}
 					}
-				} // if (modules[i].type & MOD_CONN_NET)
+				} // if (ph[i].type & MOD_CONN_NET)
 			}
 		}
 		first_client->last=time((time_t *)0);
@@ -3901,11 +4643,9 @@ int32_t accept_connection(int32_t i, int32_t j) {
 	int32_t scad = sizeof(cad), n;
 	struct s_client *cl;
 
-	if (modules[i].type==MOD_CONN_UDP) {
-		uchar *buf;
-		if (!cs_malloc(&buf, 1024))
-			return -1;
-		if ((n=recvfrom(modules[i].ptab->ports[j].fd, buf+3, 1024-3, 0, (struct sockaddr *)&cad, (socklen_t *)&scad))>0) {
+	if (ph[i].type==MOD_CONN_UDP) {
+		uchar *buf = cs_malloc(&buf, 1024, -1);
+		if ((n=recvfrom(ph[i].ptab->ports[j].fd, buf+3, 1024-3, 0, (struct sockaddr *)&cad, (socklen_t *)&scad))>0) {
 			cl=idx_from_ip(SIN_GET_ADDR(cad), ntohs(SIN_GET_PORT(cad)));
 
 			uint16_t rl;
@@ -3913,13 +4653,13 @@ int32_t accept_connection(int32_t i, int32_t j) {
 			buf[0]='U';
 			memcpy(buf+1, &rl, 2);
 
-			if (cs_check_violation(SIN_GET_ADDR(cad), modules[i].ptab->ports[j].s_port)) {
+			if (cs_check_violation(SIN_GET_ADDR(cad), ph[i].ptab->ports[j].s_port)) {
 				free(buf);
 				return 0;
 			}
 
 			cs_debug_mask(D_TRACE, "got %d bytes on port %d from ip %s:%d client %s", 
-			    n, modules[i].ptab->ports[j].s_port,
+			    n, ph[i].ptab->ports[j].s_port,
 			    cs_inet_ntoa(SIN_GET_ADDR(cad)), SIN_GET_PORT(cad),
 			    username(cl));
 
@@ -3929,9 +4669,10 @@ int32_t accept_connection(int32_t i, int32_t j) {
 
 				cl->ctyp=i;
 				cl->port_idx=j;
-				cl->udp_fd=modules[i].ptab->ports[j].fd;
+				cl->udp_fd=ph[i].ptab->ports[j].fd;
+#ifndef IPV6SUPPORT
 				cl->udp_sa=cad;
-				cl->udp_sa_len = sizeof(cl->udp_sa);
+#endif
 
 				cl->port=ntohs(SIN_GET_PORT(cad));
 				cl->typ='c';
@@ -3943,9 +4684,9 @@ int32_t accept_connection(int32_t i, int32_t j) {
 			free(buf);
 	} else { //TCP
 		int32_t pfd3;
-		if ((pfd3=accept(modules[i].ptab->ports[j].fd, (struct sockaddr *)&cad, (socklen_t *)&scad))>0) {
+		if ((pfd3=accept(ph[i].ptab->ports[j].fd, (struct sockaddr *)&cad, (socklen_t *)&scad))>0) {
 
-			if (cs_check_violation(SIN_GET_ADDR(cad), modules[i].ptab->ports[j].s_port)) {
+			if (cs_check_violation(SIN_GET_ADDR(cad), ph[i].ptab->ports[j].s_port)) {
 				close(pfd3);
 				return 0;
 			}
@@ -4021,40 +4762,24 @@ static void restart_daemon(void)
     }
   }
 }
-
-void cs_restart_oscam(void) {
-	exit_oscam=99;
-	cs_log("restart oscam requested");
-}
-
-int32_t cs_get_restartmode(void) {
-	return cs_restart_mode;
-}
 #endif
-
-void cs_exit_oscam(void) {
-	exit_oscam = 1;
-	cs_log("exit oscam requested");
-}
-
-void pidfile_create(char *pidfile) {
-	FILE *f = fopen(pidfile, "w");
-	if (f) {
-		pid_t my_pid = getpid();
-		cs_log("creating pidfile %s with pid %d", pidfile, my_pid);
-		fprintf(f, "%d\n", my_pid);
-		fclose(f);
-	}
-}
 
 int32_t main (int32_t argc, char *argv[])
 {
-	int32_t i, j;
+	uint8_t max_pending = 32;
+
 	prog_name = argv[0];
 	if (pthread_key_create(&getclient, NULL)) {
 		fprintf(stderr, "Could not create getclient, exiting...");
 		exit(1);
 	}
+
+#if defined(__arm__)
+	cs_switch_led(LED1A, LED_DEFAULT);
+	cs_switch_led(LED1A, LED_ON);
+#endif
+
+	int32_t      i, j, bg=0, gbdb=0;
 
   void (*mod_def[])(struct s_module *)=
   {
@@ -4079,9 +4804,6 @@ int32_t main (int32_t argc, char *argv[])
 #ifdef MODULE_PANDORA
            module_pandora,
 #endif
-#ifdef MODULE_GHTTP
-           module_ghttp,
-#endif
 #ifdef CS_CACHEEX
            module_csp,
 #endif
@@ -4095,7 +4817,7 @@ int32_t main (int32_t argc, char *argv[])
            module_radegast,
 #endif
 #ifdef MODULE_SERIAL
-           module_serial,
+           module_oscam_ser,
 #endif
 #ifdef HAVE_DVBAPI
 	   module_dvbapi,
@@ -4145,50 +4867,90 @@ int32_t main (int32_t argc, char *argv[])
 
   void (*cardreader_def[])(struct s_cardreader *)=
   {
-#ifdef CARDREADER_DB2COM
-	cardreader_db2com,
-#endif
-#if defined(CARDREADER_INTERNAL_AZBOX)
-	cardreader_internal_azbox,
-#elif defined(CARDREADER_INTERNAL_COOLAPI)
-	cardreader_internal_cool,
-#elif defined(CARDREADER_INTERNAL_SCI)
-	cardreader_internal_sci,
-#endif
-#ifdef CARDREADER_PHOENIX
+#ifdef WITH_CARDREADER
 	cardreader_mouse,
-#endif
-#ifdef CARDREADER_MP35
-	cardreader_mp35,
-#endif
-#ifdef CARDREADER_PCSC
-	cardreader_pcsc,
-#endif
-#ifdef CARDREADER_SC8IN1
-	cardreader_sc8in1,
-#endif
-#ifdef CARDREADER_SMARGO
 	cardreader_smargo,
-#endif
-#ifdef CARDREADER_SMART
-	cardreader_smartreader,
-#endif
-#ifdef CARDREADER_STAPI
+#ifdef WITH_STAPI
 	cardreader_stapi,
+#endif
 #endif
 	0
   };
 
-  parse_cmdline_params(argc, argv);
-  init_signal(true);
+  while ((i=getopt(argc, argv, "g:bsauc:t:d:r:w:hm:xp:S"))!=EOF)
+  {
+	  switch(i) {
+		  case 'g':
+			  gbdb=atoi(optarg);
+			  break;
+		  case 'b':
+			  bg=1;
+			  break;
+		  case 's':
+		      cs_capture_SEGV=1;
+		      break;
+		  case 'a':
+		      cs_dump_stack=1;
+		      break;
+		  case 'c':
+			  cs_strncpy(cs_confdir, optarg, sizeof(cs_confdir));
+			  break;
+		  case 'd':
+			  cs_dblevel=atoi(optarg);
+			  break;
+		  case 'r':
 
-  if (bg && do_daemon(1,0))
+#ifdef WEBIF
+			  cs_restart_mode=atoi(optarg);
+#endif
+			break;
+		  case 't':
+			  mkdir(optarg, S_IRWXU);
+			  j = open(optarg, O_RDONLY);
+			  if (j >= 0) {
+			 	close(j);
+			 	cs_strncpy(cs_tmpdir, optarg, sizeof(cs_tmpdir));
+			  } else {
+				printf("WARNING: tmpdir does not exist. using default value.\n");
+			  }
+			  break;
+			case 'w':
+				cs_waittime=strtoul(optarg, NULL, 10);
+				break;
+#ifdef WEBIF
+			case 'u':
+				cs_http_use_utf8 = 1;
+				printf("WARNING: Web interface UTF-8 mode enabled. Carefully read documentation as bugs may arise.\n");
+				break;
+#endif
+		  case 'm':
+				printf("WARNING: -m parameter is deprecated, ignoring it.\n");
+				break;
+		  case 'p':
+			  max_pending = MAX(atoi(optarg), 1);
+			  break;
+		  case 'S':
+			  log_remove_sensitive = !log_remove_sensitive;
+			  break;
+		  case 'h':
+			  usage();
+			  exit(0);
+		  default :
+			  usage();
+			  exit(1);
+	  }
+  }
+
+
+#if defined(__APPLE__)
+  if (bg && daemon_compat(1,0))
+#else
+  if (bg && daemon(1,0))
+#endif
   {
     printf("Error starting in background (errno=%d: %s)", errno, strerror(errno));
     cs_exit(1);
   }
-
-  get_random_bytes_init();
 
 #ifdef WEBIF
   if (cs_restart_mode)
@@ -4201,85 +4963,101 @@ int32_t main (int32_t argc, char *argv[])
   if (cs_confdir[strlen(cs_confdir)]!='/') strcat(cs_confdir, "/");
   init_signal_pre(); // because log could cause SIGPIPE errors, init a signal handler first
   init_first_client();
-  cs_lock_create(&system_lock, 5, "system_lock");
-  cs_lock_create(&config_lock, 10, "config_lock");
-  cs_lock_create(&gethostbyname_lock, 10, "gethostbyname_lock");
-  cs_lock_create(&clientlist_lock, 5, "clientlist_lock");
-  cs_lock_create(&readerlist_lock, 5, "readerlist_lock");
-  cs_lock_create(&fakeuser_lock, 5, "fakeuser_lock");
-  cs_lock_create(&ecmcache_lock, 5, "ecmcache_lock");
-  cs_lock_create(&readdir_lock, 5, "readdir_lock");
-  cs_lock_create(&hitcache_lock, 5, "hitcache_lock");
-  coolapi_open_all();
   init_config();
-  cs_init_log();
-  pidfile_create(cfg.pidfile);
-  cs_init_statistics();
   init_check();
+#ifdef WITH_LB
   init_stat();
+#endif
 
-  // These initializations *MUST* be called after init_config()
-  // because modules depend on config values.
-  for (i=0; mod_def[i]; i++)
+  for (i=0; mod_def[i]; i++)  // must be later BEFORE init_config()
   {
-	memset(&modules[i], 0, sizeof(struct s_module));
-	mod_def[i](&modules[i]);
+    memset(&ph[i], 0, sizeof(struct s_module));
+    mod_def[i](&ph[i]);
   }
-  for (i=0; cardsystem_def[i]; i++)
+  for (i=0; cardsystem_def[i]; i++)  // must be later BEFORE init_config()
   {
-	memset(&cardsystems[i], 0, sizeof(struct s_cardsystem));
-	cardsystem_def[i](&cardsystems[i]);
-  }
-  for (i=0; cardreader_def[i]; i++)
-  {
-	memset(&cardreaders[i], 0, sizeof(struct s_cardreader));
-	cardreader_def[i](&cardreaders[i]);
+    memset(&cardsystem[i], 0, sizeof(struct s_cardsystem));
+    cardsystem_def[i](&cardsystem[i]);
   }
 
+  for (i=0; cardreader_def[i]; i++)  // must be later BEFORE init_config()
+  {
+    memset(&cardreader[i], 0, sizeof(struct s_cardreader));
+    cardreader_def[i](&cardreader[i]);
+  }
+
+  init_rnd();
   init_sidtab();
   init_readerdb();
   cfg.account = init_userdb();
-  init_signal(false);
+  init_signal();
   init_srvid();
   init_tierid();
+  //Todo #ifdef CCCAM
   init_provid();
 
   start_garbage_collector(gbdb);
 
-  cacheex_init();
+  //set cacheex cccam+camd35 node id:
+#ifdef CS_CACHEEX
+#if defined MODULE_CAMD35 || defined MODULE_CAMD35_TCP
+#ifdef MODULE_CCCAM
+  cacheex_set_peer_id(cc_get_cccam_node_id());
+#else
+  cacheex_update_peer_id();
+#endif
+#endif
+#endif
 
   init_len4caid();
+#ifdef IRDETO_GUESSING
   init_irdeto_guess_tab();
+#endif
 
-  write_versionfile(false);
+  write_versionfile();
   server_pid = getpid();
 
-  led_init();
-  led_status_default();
+#if defined(__arm__)
+  arm_led_start_thread();
+#endif
 
-  azbox_init();
+#if defined(WITH_AZBOX) && defined(HAVE_DVBAPI)
+  openxcas_debug_message_onoff(1);  // debug
 
-  mca_init();
+#ifdef WITH_CARDREADER
+  if (openxcas_open_with_smartcard("oscamCAS") < 0) {
+#else
+  if (openxcas_open("oscamCAS") < 0) {
+#endif
+    cs_log("openxcas: could not init");
+  }
+#endif
 
   global_whitelist_read();
-  cacheex_load_config_file();
+#ifdef CS_CACHEEX
+  cacheex_matcher_read();
+#endif
 
   for (i=0; i<CS_MAX_MOD; i++)
-    if( (modules[i].type & MOD_CONN_NET) && modules[i].ptab )
-      for(j=0; j<modules[i].ptab->nports; j++)
+    if( (ph[i].type & MOD_CONN_NET) && ph[i].ptab )
+      for(j=0; j<ph[i].ptab->nports; j++)
       {
-        start_listener(&modules[i], j);
+        start_listener(&ph[i], j);
       }
 
 	//set time for server to now to avoid 0 in monitor/webif
 	first_client->last=time((time_t *)0);
 
-	webif_init();
-
+#ifdef WEBIF
+	if(cfg.http_port == 0)
+		cs_log("http disabled");
+	else
+		start_thread((void *) &http_srv, "http");
+#endif
 	start_thread((void *) &reader_check, "reader check");
 	start_thread((void *) &check_thread, "check");
 
-	lcd_thread_start();
+	start_lcd_thread();
 
 #ifndef WITH_CARDREADER
 	cs_log("Binary without Cardreader Support! No EMM processing possible!");
@@ -4300,7 +5078,7 @@ int32_t main (int32_t argc, char *argv[])
 	cs_log("Binary without Seca Module - no EMM processing for Seca possible!");
 #endif
 #ifndef READER_VIACCESS
-	cs_log("Binary without Viaccess Module - no EMM processing for Viaccess possible!");
+	cs_log("Binary without Viaaccess Module - no EMM processing for Viaaccess possible!");
 #endif
 #ifndef READER_VIDEOGUARD
 	cs_log("Binary without Videoguard Module - no EMM processing for Videoguard possible!");
@@ -4319,21 +5097,47 @@ int32_t main (int32_t argc, char *argv[])
 
 	cs_waitforcardinit();
 
-	led_status_starting();
+#if defined(__arm__)
+	if(cfg.enableled == 1){
+		cs_switch_led(LED1A, LED_OFF);
+		cs_switch_led(LED1B, LED_ON);
+	}
+#endif
 
-	ac_init();
+#ifdef QBOXHD
+	if(cfg.enableled == 2){
+		cs_log("QboxHD LED enabled");
+    qboxhd_led_blink(QBOXHD_LED_COLOR_YELLOW,QBOXHD_LED_BLINK_FAST);
+    qboxhd_led_blink(QBOXHD_LED_COLOR_RED,QBOXHD_LED_BLINK_FAST);
+    qboxhd_led_blink(QBOXHD_LED_COLOR_GREEN,QBOXHD_LED_BLINK_FAST);
+    qboxhd_led_blink(QBOXHD_LED_COLOR_BLUE,QBOXHD_LED_BLINK_FAST);
+    qboxhd_led_blink(QBOXHD_LED_COLOR_MAGENTA,QBOXHD_LED_BLINK_FAST);
+  }
+#endif
+
+#ifdef CS_ANTICASC
+	if( !cfg.ac_enabled )
+		cs_log("anti cascading disabled");
+	else {
+		init_ac();
+		ac_init_stat();
+	}
+#endif
 
 	for (i=0; i<CS_MAX_MOD; i++)
-		if (modules[i].type & MOD_CONN_SERIAL)   // for now: oscam_ser only
-			if (modules[i].s_handler)
-				modules[i].s_handler(NULL, NULL, i);
+		if (ph[i].type & MOD_CONN_SERIAL)   // for now: oscam_ser only
+			if (ph[i].s_handler)
+				ph[i].s_handler(NULL, NULL, i);
 
 	// main loop function
 	client_check();
 
-	azbox_close();
 
-	mca_close();
+#if defined(WITH_AZBOX) && defined(HAVE_DVBAPI)
+  if (openxcas_close() < 0) {
+    cs_log("openxcas: could not close");
+  }
+#endif
 
 	cs_cleanup();
 	while(ll_count(log_list) > 0)
@@ -4342,3 +5146,235 @@ int32_t main (int32_t argc, char *argv[])
 
 	return exit_oscam;
 }
+
+void cs_exit_oscam(void)
+{
+  exit_oscam=1;
+  cs_log("exit oscam requested");
+}
+
+#ifdef WEBIF
+void cs_restart_oscam(void)
+{
+  exit_oscam=99;
+  cs_log("restart oscam requested");
+}
+
+int32_t cs_get_restartmode(void) {
+	return cs_restart_mode;
+}
+
+#endif
+
+#if defined(__arm__)
+static void cs_switch_led_from_thread(int32_t led, int32_t action) {
+
+	if(action < 2) { // only LED_ON and LED_OFF
+		char ledfile[256];
+		FILE *f;
+
+		#ifdef DOCKSTAR
+			switch(led){
+			case LED1A:snprintf(ledfile, 255, "/sys/class/leds/dockstar:orange:misc/brightness");
+			break;
+			case LED1B:snprintf(ledfile, 255, "/sys/class/leds/dockstar:green:health/brightness");
+			break;
+			case LED2:snprintf(ledfile, 255, "/sys/class/leds/dockstar:green:health/brightness");
+			break;
+			case LED3:snprintf(ledfile, 255, "/sys/class/leds/dockstar:orange:misc/brightness");
+			break;
+			}
+		#elif WRT350NV2
+			switch(led){
+			case LED1A:snprintf(ledfile, 255, "/sys/class/leds/wrt350nv2:orange:power/brightness");
+			break;
+			case LED1B:snprintf(ledfile, 255, "/sys/class/leds/wrt350nv2:green:power/brightness");
+			break;
+			case LED2:snprintf(ledfile, 255, "/sys/class/leds/wrt350nv2:green:wireless/brightness");
+			break;
+			case LED3:snprintf(ledfile, 255, "/sys/class/leds/wrt350nv2:green:security/brightness");
+			break;
+			}
+		#else
+			switch(led){
+			case LED1A:snprintf(ledfile, 255, "/sys/class/leds/nslu2:red:status/brightness");
+			break;
+			case LED1B:snprintf(ledfile, 255, "/sys/class/leds/nslu2:green:ready/brightness");
+			break;
+			case LED2:snprintf(ledfile, 255, "/sys/class/leds/nslu2:green:disk-1/brightness");
+			break;
+			case LED3:snprintf(ledfile, 255, "/sys/class/leds/nslu2:green:disk-2/brightness");
+			break;
+			}
+		#endif
+
+		if (!(f=fopen(ledfile, "w"))){
+			// FIXME: sometimes cs_log was not available when calling cs_switch_led -> signal 11
+			// cs_log("Cannot open file \"%s\" (errno=%d %s)", ledfile, errno, strerror(errno));
+			return;
+		}
+		fprintf(f,"%d", action);
+		fclose(f);
+	} else { // LED Macros
+		switch(action){
+		case LED_DEFAULT:
+			cs_switch_led_from_thread(LED1A, LED_OFF);
+			cs_switch_led_from_thread(LED1B, LED_OFF);
+			cs_switch_led_from_thread(LED2, LED_ON);
+			cs_switch_led_from_thread(LED3, LED_OFF);
+			break;
+		case LED_BLINK_OFF:
+			cs_switch_led_from_thread(led, LED_OFF);
+			cs_sleepms(100);
+			cs_switch_led_from_thread(led, LED_ON);
+			break;
+		case LED_BLINK_ON:
+			cs_switch_led_from_thread(led, LED_ON);
+			cs_sleepms(300);
+			cs_switch_led_from_thread(led, LED_OFF);
+			break;
+		}
+	}
+}
+
+static void* arm_led_thread_main(void *UNUSED(thread_data)) {
+	uint8_t running = 1;
+	while (running) {
+		LL_ITER iter = ll_iter_create(arm_led_actions);
+		struct s_arm_led *arm_led;
+		while ((arm_led = ll_iter_next(&iter))) {
+			int32_t led, action;
+			time_t now, start;
+			led = arm_led->led;
+			action = arm_led->action;
+			now = time((time_t)0);
+			start = arm_led->start_time;
+			ll_iter_remove_data(&iter);
+			if (action == LED_STOP_THREAD) {
+				running = 0;
+				break;
+			}
+			if (now - start < ARM_LED_TIMEOUT) {
+				cs_switch_led_from_thread(led, action);
+			}
+		}
+		if (running) {
+			sleep(60);
+		}
+	}
+	ll_clear_data(arm_led_actions);
+	pthread_exit(NULL);
+	return NULL;
+}
+
+void arm_led_start_thread(void) {
+	// call this after signal handling is done
+	if ( ! arm_led_actions ) {
+		arm_led_actions = ll_create("arm_led_actions");
+	}
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	cs_log("starting thread arm_led_thread");
+	pthread_attr_setstacksize(&attr, PTHREAD_STACK_SIZE);
+	int32_t ret = pthread_create(&arm_led_thread, &attr, arm_led_thread_main, NULL);
+	if (ret)
+		cs_log("ERROR: can't create arm_led_thread thread (errno=%d %s)", ret, strerror(ret));
+	else {
+		cs_log("arm_led_thread thread started");
+		pthread_detach(arm_led_thread);
+	}
+	pthread_attr_destroy(&attr);
+}
+
+void arm_led_stop_thread(void) {
+	cs_switch_led(0, LED_STOP_THREAD);
+}
+
+void cs_switch_led(int32_t led, int32_t action) {
+	struct s_arm_led *arm_led;
+    if(cs_malloc(&arm_led,sizeof(struct s_arm_led), -1)) {
+	arm_led->start_time = time((time_t)0);
+	arm_led->led = led;
+	arm_led->action = action; }
+	if ( ! arm_led_actions ) {
+		arm_led_actions = ll_create("arm_led_actions");
+	}
+	ll_append(arm_led_actions, (void *)arm_led);
+	if (arm_led_thread) {
+		// arm_led_thread_main is not started at oscam startup
+		// when first cs_switch_led calls happen
+		pthread_kill(arm_led_thread, OSCAM_SIGNAL_WAKEUP);
+	}
+
+}
+#endif
+
+#ifdef QBOXHD
+void qboxhd_led_blink(int32_t color, int32_t duration) {
+    int32_t f;
+
+    // try QboxHD-MINI first
+    if ( (f = open ( QBOXHDMINI_LED_DEVICE,  O_RDWR |O_NONBLOCK )) > -1 ) {
+        qboxhdmini_led_color_struct qbminiled;
+        uint32_t qboxhdmini_color = 0x000000;
+
+        if (color != QBOXHD_LED_COLOR_OFF) {
+            switch(color) {
+                case QBOXHD_LED_COLOR_RED:
+                    qboxhdmini_color = QBOXHDMINI_LED_COLOR_RED;
+                    break;
+                case QBOXHD_LED_COLOR_GREEN:
+                    qboxhdmini_color = QBOXHDMINI_LED_COLOR_GREEN;
+                    break;
+                case QBOXHD_LED_COLOR_BLUE:
+                    qboxhdmini_color = QBOXHDMINI_LED_COLOR_BLUE;
+                    break;
+                case QBOXHD_LED_COLOR_YELLOW:
+                    qboxhdmini_color = QBOXHDMINI_LED_COLOR_YELLOW;
+                    break;
+                case QBOXHD_LED_COLOR_MAGENTA:
+                    qboxhdmini_color = QBOXHDMINI_LED_COLOR_MAGENTA;
+                    break;
+            }
+
+            // set LED on with color
+            qbminiled.red = (uchar)((qboxhdmini_color&0xFF0000)>>16);  // R
+            qbminiled.green = (uchar)((qboxhdmini_color&0x00FF00)>>8); // G
+            qbminiled.blue = (uchar)(qboxhdmini_color&0x0000FF);       // B
+
+            ioctl(f,QBOXHDMINI_IOSET_RGB,&qbminiled);
+            cs_sleepms(duration);
+        }
+
+        // set LED off
+        qbminiled.red = 0;
+        qbminiled.green = 0;
+        qbminiled.blue = 0;
+
+        ioctl(f,QBOXHDMINI_IOSET_RGB,&qbminiled);
+        close(f);
+
+    } else if ( (f = open ( QBOXHD_LED_DEVICE,  O_RDWR |O_NONBLOCK )) > -1 ) {
+
+        qboxhd_led_color_struct qbled;
+
+        if (color != QBOXHD_LED_COLOR_OFF) {
+            // set LED on with color
+            qbled.H = color;
+            qbled.S = 99;
+            qbled.V = 99;
+            ioctl(f,QBOXHD_SET_LED_ALL_PANEL_COLOR, &qbled);
+            cs_sleepms(duration);
+        }
+
+        // set LED off
+        qbled.H = 0;
+        qbled.S = 0;
+        qbled.V = 0;
+        ioctl(f,QBOXHD_SET_LED_ALL_PANEL_COLOR, &qbled);
+        close(f);
+    }
+
+    return;
+}
+#endif

@@ -2,9 +2,7 @@
 
 #ifdef MODULE_PANDORA
 
-#include "oscam-client.h"
-#include "oscam-net.h"
-#include "oscam-string.h"
+#include "global-functions.h"
 
 #define CWS_NETMSGSIZE 320
 #define START_TIME 150000
@@ -35,21 +33,21 @@ static void pandora_process_request(struct s_client *cl, uchar *buf, int32_t l) 
 	if (l > 12 + CS_ECMSTORESIZE + 16) {
 		ecmlen = b2i(2, buf + 12 + CS_ECMSTORESIZE);
 		if ((ecmlen > 320) || cl->pand_ignore_ecm)
-			er->ecmlen = 0;
+			er->l = 0;
 		else {
 			if (!memcmp(buf + 10,
 					MD5(buf + 14 + CS_ECMSTORESIZE, ecmlen, md5tmp),
 					CS_ECMSTORESIZE)) {
-				er->ecmlen = ecmlen;
+				er->l = ecmlen;
 				memcpy(er->ecm, buf + 14 + CS_ECMSTORESIZE, ecmlen);
 				//set_ecmhash(cl, er);
 			} else
-				er->ecmlen = 0;
+				er->l = 0;
 		}
 	} else
-		er->ecmlen = 0;
+		er->l = 0;
 
-	if (!er->ecmlen)
+	if (!er->l)
 		usleep(cl->pand_autodelay);
 	get_cw(cl, er);
 }
@@ -62,7 +60,9 @@ static int pandora_recv(struct s_client *cl, uchar *buf, int32_t l) {
 	if (cl->typ != 'c')
 		ret = recv_from_udpipe(buf);
 	else {
-		ret = recvfrom(cl->udp_fd, buf, l, 0, (struct sockaddr *)&cl->udp_sa, &cl->udp_sa_len);
+		uint32_t clilen = sizeof(cl->udp_sa);
+		ret = recvfrom(cl->udp_fd, buf, l, 0, (struct sockaddr *) &cl->udp_sa,
+				(socklen_t *)&clilen);
 	}
 	if (ret < 1)
 		return (-1);
@@ -91,7 +91,8 @@ static void pandora_send_dcw(struct s_client *cl, ECM_REQUEST *er) {
 			cl->pand_autodelay += 100000;
 	}
 	simple_crypt(msgbuf, len, cl->pand_md5_key, 16);
-	sendto(cl->udp_fd, msgbuf, len, 0, (struct sockaddr *) &cl->udp_sa, cl->udp_sa_len);
+	sendto(cl->udp_fd, msgbuf, len, 0, (struct sockaddr *) &cl->udp_sa,
+			sizeof(cl->udp_sa));
 }
 
 int pandora_auth_client(struct s_client *cl, IN_ADDR_T ip) {
@@ -110,16 +111,16 @@ int pandora_auth_client(struct s_client *cl, IN_ADDR_T ip) {
 
 		if (!ok) {
 			cs_auth_client(cl, (struct s_auth *) 0, "IP not allowed");
-			return 0;
+			cs_exit(0);
 		}
 	}
 #endif
 
-	for (ok = 0, account = cfg.account; cfg.pand_usr && account && !ok; account = account->next) {
-		ok = streq(cfg.pand_usr, account->usr);
-		if (ok && cs_auth_client(cl, account, NULL))
-			cs_disconnect_client(cl);
-	}
+	for (ok = 0, account = cfg.account; (cfg.pand_usr[0]) && (account) && (!ok); account
+			= account->next)
+		if ((ok = (!strcmp(cfg.pand_usr, account->usr))))
+			if (cs_auth_client(cl, account, NULL))
+				cs_exit(0);
 	if (!ok)
 		cs_auth_client(cl, (struct s_auth *) (-1), NULL);
 	return ok;
@@ -129,7 +130,7 @@ static void * pandora_server(struct s_client *cl, uchar *UNUSED(mbuf),
 		int32_t UNUSED(len)) {
 	uchar md5tmp[MD5_DIGEST_LENGTH];
 	if (!cl->init_done) {
-		if (cfg.pand_pass) {
+		if (cfg.pand_pass[0]) {
 			cl->pand_autodelay = 150000;
 			memcpy(cl->pand_md5_key,
 					MD5((uchar*)cfg.pand_pass, strlen(cfg.pand_pass), md5tmp), 16);
@@ -139,6 +140,7 @@ static void * pandora_server(struct s_client *cl, uchar *UNUSED(mbuf),
 			cl->init_done = 1;
 		} else {
 			cs_log("Password for Pandora share MUST be set !!!");
+			cs_exit(1);
 		}
 	}
 	return NULL;
@@ -173,7 +175,7 @@ int pandora_client_init(struct s_client *cl) {
 
 	if ((cl->udp_fd = socket(PF_INET, SOCK_DGRAM, p_proto)) < 0) {
 		cs_log("Socket creation failed (errno=%d)", errno);
-		return 1;
+		cs_exit(1);
 	}
 
 	set_socket_priority(cl->udp_fd, cfg.netprio);
@@ -228,18 +230,19 @@ static int pandora_send_ecm(struct s_client *cl, ECM_REQUEST *er, uchar *UNUSED(
 	msgbuf[7] = er->prid >> 8;
 	msgbuf[8] = er->prid & 0xFF;
 	msgbuf[9] = adel;
-	memcpy(&msgbuf[10], MD5(er->ecm, er->ecmlen, md5tmp), CS_ECMSTORESIZE);
+	memcpy(&msgbuf[10], MD5(er->ecm, er->l, md5tmp), CS_ECMSTORESIZE);
 	msgbuf[10 + CS_ECMSTORESIZE] = er->chid >> 8;
 	msgbuf[11 + CS_ECMSTORESIZE] = er->chid & 0xFF;
 	len = 12 + CS_ECMSTORESIZE;
 	if (cl->pand_send_ecm) {
-		msgbuf[12 + CS_ECMSTORESIZE] = er->ecmlen >> 8;
-		msgbuf[13 + CS_ECMSTORESIZE] = er->ecmlen & 0xFF;
-		memcpy(&msgbuf[14 + CS_ECMSTORESIZE], er->ecm, er->ecmlen);
-		len += er->ecmlen + 2;
+		msgbuf[12 + CS_ECMSTORESIZE] = er->l >> 8;
+		msgbuf[13 + CS_ECMSTORESIZE] = er->l & 0xFF;
+		memcpy(&msgbuf[14 + CS_ECMSTORESIZE], er->ecm, er->l);
+		len += er->l + 2;
 	}
 	simple_crypt(msgbuf, len, cl->pand_md5_key, 16);
-	ret = sendto(cl->pfd, msgbuf, len, 0, (struct sockaddr *) &cl->udp_sa, cl->udp_sa_len);
+	ret = sendto(cl->pfd, msgbuf, len, 0, (struct sockaddr *) &cl->udp_sa,
+			sizeof(cl->udp_sa));
 	return ((ret < len) ? (-1) : 0);
 }
 

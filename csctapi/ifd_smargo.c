@@ -1,7 +1,8 @@
 #include "../globals.h"
-
-#ifdef CARDREADER_SMARGO
-#include "../oscam-time.h"
+#ifdef WITH_CARDREADER
+#include "atr.h"
+#include <termios.h>
+#include "ifd_phoenix.h"
 #include "icc_async.h"
 #include "io_serial.h"
 
@@ -14,8 +15,8 @@
 
 #define OK 0
 #define ERROR 1
-#define LOBYTE(w) ((unsigned char)((w) & 0xff))
-#define HIBYTE(w) ((unsigned char)((w) >> 8))
+#define LOBYTE(w) ((BYTE)((w) & 0xff))
+#define HIBYTE(w) ((BYTE)((w) >> 8))
 
 #define DELAY 150
 
@@ -39,25 +40,25 @@ static int32_t smargo_set_settings(struct s_reader *reader, int32_t freq, unsign
 		data[1]=HIBYTE(Fi);
 		data[2]=LOBYTE(Fi);
 		data[3]=Di;
-		IO_Serial_Write(reader, 0, 1000, 4, data);
+		IO_Serial_Write(reader, 0, 4, data);
 	}
 
 	data[0]=0x02;
 	data[1]=HIBYTE(freqk);
 	data[2]=LOBYTE(freqk);
-	IO_Serial_Write(reader, 0, 1000, 3, data);
+	IO_Serial_Write(reader, 0, 3, data);
 
 	data[0]=0x03;
 	data[1]=Ni;
-	IO_Serial_Write(reader, 0, 1000, 2, data);
+	IO_Serial_Write(reader, 0, 2, data);
 
 	data[0]=0x04;
 	data[1]=T;
-	IO_Serial_Write(reader, 0, 1000, 2, data);
+	IO_Serial_Write(reader, 0, 2, data);
 
 	data[0]=0x05;
-	data[1]=inv;
-	IO_Serial_Write(reader, 0, 1000, 2, data);
+	data[1]=0; //always done by oscam
+	IO_Serial_Write(reader, 0, 2, data);
 
 	cs_sleepms(DELAY);
 
@@ -78,32 +79,25 @@ static int32_t smargo_writesettings(struct s_reader *reader, uint32_t UNUSED(ETU
 static int32_t smargo_init(struct s_reader *reader) {
 	rdr_log(reader, "smargo init");
 	reader->handle = open (reader->device,  O_RDWR);
-
 	if (reader->handle < 0) {
 		rdr_log(reader, "ERROR: Opening device %s (errno=%d %s)",reader->device, errno, strerror(errno));
 		return ERROR;
 	}
 
-	if(IO_Serial_SetParams (reader, DEFAULT_BAUDRATE, 8, PARITY_EVEN, 2, NULL, NULL))
-		return ERROR;
-	
-	IO_Serial_RTS_Set(reader);
-	IO_Serial_DTR_Set(reader);
-	IO_Serial_Flush(reader);
-
 	return OK;
 }
 
-static int32_t smargo_Serial_Read(struct s_reader * reader, uint32_t timeout, uint32_t size, unsigned char * data, int32_t *read_bytes)
+bool IO_Serial_WaitToRead (struct s_reader * reader, uint32_t delay_ms, uint32_t timeout_ms);
+int32_t smargo_Serial_Read(struct s_reader * reader, uint32_t timeout, uint32_t size, BYTE * data, int32_t *read_bytes)
 {
+	BYTE c;
 	uint32_t count = 0;
-	uint32_t bytes_read = 0;
-
-	for (count = 0; count < size ; count += bytes_read)
+	
+	for (count = 0; count < size ; count++)
 	{
-		if (IO_Serial_WaitToRead (reader, 0, timeout) == OK)
+		if (!IO_Serial_WaitToRead (reader, 0, timeout))
 		{
-			if ((bytes_read = read (reader->handle, data + count, size - count)) < 1)
+			if (read (reader->handle, &c, 1) != 1)
 			{
 				int saved_errno = errno;
 				rdr_ddump_mask(reader, D_DEVICE, data, count, "Receiving:");
@@ -114,14 +108,16 @@ static int32_t smargo_Serial_Read(struct s_reader * reader, uint32_t timeout, ui
 		else
 		{
 			rdr_ddump_mask(reader, D_DEVICE, data, count, "Receiving:");
-			rdr_debug_mask(reader, D_DEVICE, "Timeout in IO_Serial_Read");
+			rdr_debug_mask(reader, D_DEVICE, "TIMEOUT in IO_Serial_Read");
 			*read_bytes=count;
 			return ERROR;
 		}
+		data[count] = c;
 	}
 	rdr_ddump_mask(reader, D_DEVICE, data, count, "Receiving:");
 	return OK;
 }
+
 
 static int32_t smargo_reset(struct s_reader *reader, ATR *atr) {
 	rdr_debug_mask(reader, D_IFD, "Smargo: Resetting card");
@@ -146,7 +142,7 @@ static int32_t smargo_reset(struct s_reader *reader, ATR *atr) {
 
 		//IO_Serial_Flush(reader);
 
-		IO_Serial_Read(reader, 0, 500000, ATR_MAX_SIZE, buf);
+		IO_Serial_Read(reader, 500, ATR_MAX_SIZE, buf);
 
 		IO_Serial_RTS_Set(reader);
 		cs_sleepms(150);
@@ -166,55 +162,36 @@ static int32_t smargo_reset(struct s_reader *reader, ATR *atr) {
 		if((buf[0]!=0x3B && buf[0]!=0x03 && buf[0]!=0x3F) || (buf[1]==0xFF && buf[2]==0x00))
 			continue; // this is not a valid ATR
 
-		if (ATR_InitFromArray (atr, buf, n) != ERROR)
+		if (ATR_InitFromArray (atr, buf, n) == ATR_OK)
 			ret = OK;
 
 		if (ret == OK)
 			break;
 	}
 
-	int32_t convention;
-
-	ATR_GetConvention (atr, &convention);
-	// If inverse convention, switch here due to if not PTS will fail
-	if (convention == ATR_CONVENTION_INVERSE) {
-		struct termios term;
-		uchar data[4];
-
-		tcgetattr(reader->handle, &term);
-		term.c_cflag &= ~CSIZE;
-		term.c_cflag |= CS5;
-		tcsetattr(reader->handle, TCSANOW, &term);
-
-		cs_sleepms(DELAY);
-
-		data[0]=0x05;
-		data[1]=0x01;
-		IO_Serial_Write(reader, 0, 1000, 2, data);
-
-		cs_sleepms(DELAY);
-
-		tcgetattr(reader->handle, &term);
-		term.c_cflag &= ~CSIZE;
-		term.c_cflag |= CS8;
-		tcsetattr(reader->handle, TCSANOW, &term);
-	}
-
 	return ret;
+}
+
+static int32_t smargo_receive(struct s_reader *reader, unsigned char *data, uint32_t size) {
+	return Phoenix_Receive(reader, data, size, reader->read_timeout);
+}
+
+static int32_t smargo_transmit(struct s_reader *reader, unsigned char *sent, uint32_t size) {
+	return Phoenix_Transmit(reader, sent, size, 0, 0);
 }
 
 void cardreader_smargo(struct s_cardreader *crdr) 
 {
 	crdr->desc		= "smargo";
 	crdr->reader_init	= smargo_init;
-	crdr->get_status	= IO_Serial_GetStatus;
+	crdr->get_status	= Phoenix_GetStatus;
 	crdr->activate	= smargo_reset;
-	crdr->transmit	= IO_Serial_Transmit;
-	crdr->receive		= IO_Serial_Receive;
-	crdr->close		= IO_Serial_Close;
+	crdr->transmit	= smargo_transmit;
+	crdr->receive		= smargo_receive;
+	crdr->close		= Phoenix_Close;
 	crdr->write_settings = smargo_writesettings;
 	crdr->typ		= R_MOUSE;
 
-	crdr->max_clock_speed	= 1;
+	crdr->need_inverse	= 1;
 }
 #endif

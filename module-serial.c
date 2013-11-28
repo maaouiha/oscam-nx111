@@ -1,10 +1,6 @@
 #include "globals.h"
 #ifdef MODULE_SERIAL
 #include <termios.h>
-#include "oscam-client.h"
-#include "oscam-net.h"
-#include "oscam-string.h"
-#include "oscam-time.h"
 
 #define HSIC_CRC 0xA5
 #define SSSP_MAX_PID 8
@@ -730,6 +726,7 @@ static void oscam_ser_send_dcw(struct s_client *client, ECM_REQUEST *er)
         oscam_ser_send(client, mbuf, 17);
         if( serialdata->dsr9500type==P_DSR_GNUSMAS )
         {
+          int32_t i;
           serialdata->samsung_0a=0;
           for( i=1; i<17; i++ )
             if( mbuf[i]==0x0A )
@@ -831,12 +828,12 @@ static int32_t oscam_ser_check_ecm(ECM_REQUEST *er, uchar *buf, int32_t l)
   switch(serialdata->connected)
   {
     case P_HSIC:
-      er->ecmlen = l-12;
+      er->l    = l-12;
       er->caid = b2i(2, buf+1 );
       er->prid = b2i(3, buf+3 );
       er->pid  = b2i(2, buf+6 );
       er->srvid= b2i(2, buf+10);
-      memcpy(er->ecm, buf+12, er->ecmlen);
+      memcpy(er->ecm, buf+12, er->l);
       break;
     case P_SSSP:
       er->pid=b2i(2, buf+3);
@@ -846,56 +843,56 @@ static int32_t oscam_ser_check_ecm(ECM_REQUEST *er, uchar *buf, int32_t l)
         cs_debug_mask(D_CLIENT, "illegal request, unknown pid=%04X", er->pid);
         return(2);
       }
-      er->ecmlen = l-5;
+      er->l    = l-5;
       er->srvid= serialdata->sssp_srvid;
       er->caid = serialdata->sssp_tab[i].caid;
       er->prid = serialdata->sssp_tab[i].prid;
-      memcpy(er->ecm, buf+5, er->ecmlen);
+      memcpy(er->ecm, buf+5, er->l);
       break;
     case P_BOMBA:
-      er->ecmlen = l;
-      memcpy(er->ecm, buf, er->ecmlen);
+      er->l=l;
+      memcpy(er->ecm, buf, er->l);
       break;
     case P_DSR95:
       buf[l]='\0';	// prepare for trim
       trim((char *)buf+13);	// strip spc, nl, cr ...
-      er->ecmlen = strlen((char *)buf+13)>>1;
+      er->l=strlen((char *)buf+13)>>1;
       er->prid=cs_atoi((char *)buf+3, 3, 0);	// ignore errors
       er->caid=cs_atoi((char *)buf+9, 2, 0);	// ignore errors
-      if (cs_atob(er->ecm, (char *)buf+13, er->ecmlen)<0)
+      if (cs_atob(er->ecm, (char *)buf+13, er->l)<0)
       {
         cs_log("illegal characters in ecm-request");
         return(1);
       }
       if( serialdata->dsr9500type==P_DSR_WITHSID )
       {
-        er->ecmlen -= 2;
-        er->srvid=cs_atoi((char *)buf+13+(er->ecmlen << 1), 2, 0);
+        er->l-=2;
+        er->srvid=cs_atoi((char *)buf+13+(er->l<<1), 2, 0);
       }
       break;
     case P_GS:
-      er->ecmlen = ((buf[3]<<8)|buf[2]) - 6;
+      er->l     = ((buf[3]<<8)|buf[2]) - 6;
       er->srvid =  (buf[5]<<8)|buf[4]; // sid
       er->caid  =  (buf[7]<<8)|buf[6];
       er->prid  = 0;
-      if (er->ecmlen > 256) er->ecmlen = 256;
-      memcpy(er->ecm, buf+10, er->ecmlen);
+      if (er->l>256) er->l=256;
+      memcpy(er->ecm, buf+10, er->l);
       break;
     case P_ALPHA:
       l=oscam_ser_alpha_convert(buf, l);
-      er->ecmlen= b2i(2, buf+1 )-2;
+      er->l     = b2i(2, buf+1 )-2;
       er->caid  = b2i(2, buf+3 );
-      if ((er->ecmlen!=l-5) || (er->ecmlen>257))
+      if ((er->l!=l-5) || (er->l>257))
       {
         cs_log(incomplete, l);
         return(1);
       }
-      memcpy(er->ecm, buf+5, er->ecmlen);
+      memcpy(er->ecm, buf+5, er->l);
       break;
     case P_GBOX:
       er->srvid = b2i(2, buf+serialdata->gbox_lens.cat_len+3+3);
-      er->ecmlen = serialdata->gbox_lens.ecm_len+3;
-      memcpy(er->ecm, buf+serialdata->gbox_lens.cat_len+3+serialdata->gbox_lens.pmt_len+3, er->ecmlen);
+      er->l = serialdata->gbox_lens.ecm_len+3;
+      memcpy(er->ecm, buf+serialdata->gbox_lens.cat_len+3+serialdata->gbox_lens.pmt_len+3, er->l);
       break;
   }
   return(0);
@@ -1019,9 +1016,9 @@ static void * oscam_ser_fork(void *pthreadparam)
   cl->ctyp = pparam->ctyp;
   cl->account=first_client->account;
 
-  if (!cl->serialdata && !cs_malloc(&cl->serialdata, sizeof(struct s_serial_client)))
-    return NULL;
-
+  if(!cl->serialdata){
+  	if(!cs_malloc(&cl->serialdata,sizeof(struct s_serial_client), -1)) return NULL;
+  }
   oscam_init_serialdata(cl->serialdata);
   oscam_copy_serialdata(cl->serialdata, &pparam->serialdata);
   cs_log("serial: initialized (%s@%s)", cl->serialdata->oscam_ser_proto>P_MAX ?
@@ -1055,10 +1052,7 @@ void * init_oscam_ser(struct s_client *UNUSED(cl), uchar *UNUSED(mbuf), int32_t 
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, PTHREAD_STACK_SIZE);
   oscam_init_serialdata(&param.serialdata);
-	if (cfg.ser_device)
-		cs_strncpy(sdevice, cfg.ser_device, sizeof(sdevice));
-	else
-		memset(sdevice, 0, sizeof(sdevice));
+	cs_strncpy(sdevice, cfg.ser_device, sizeof(sdevice));
 	param.ctyp=len;
 	char *p;
 	pthread_t temp;
@@ -1105,9 +1099,9 @@ void * init_oscam_ser(struct s_client *UNUSED(cl), uchar *UNUSED(mbuf), int32_t 
 
 static int32_t oscam_ser_client_init(struct s_client *client)
 {
-  if (!client->serialdata && !cs_malloc(&client->serialdata, sizeof(struct s_serial_client)))
-    return 1;
-
+  if(!client->serialdata){
+  	if(!cs_malloc(&client->serialdata,sizeof(struct s_serial_client), -1)) return 1;
+  }
   oscam_init_serialdata(client->serialdata);
 
   if ((!client->reader->device[0])) cs_disconnect_client(client);
@@ -1128,35 +1122,35 @@ static int32_t oscam_ser_send_ecm(struct s_client *client, ECM_REQUEST *er, ucha
       i2b_buf(3, er->prid, buf + 3);
       i2b_buf(2, er->pid, buf + 6);
       i2b_buf(2, er->srvid, buf + 10);
-      memcpy(buf+12, er->ecm, er->ecmlen);
-      oscam_ser_send(client, buf, 12+er->ecmlen);
+      memcpy(buf+12, er->ecm, er->l);
+      oscam_ser_send(client, buf, 12+er->l);
       break;
     case P_BOMBA:
-      oscam_ser_send(client, er->ecm, er->ecmlen);
+      oscam_ser_send(client, er->ecm, er->l);
       break;
     case P_DSR95:
-      if (cs_malloc(&tmp, er->ecmlen * 2 + 1)) {
+    	if(cs_malloc(&tmp, er->l * 2 + 1, -1)){
 	      if( client->serialdata->dsr9500type==P_DSR_WITHSID )
 	      {
 	        snprintf((char *)buf, 512, "%c%08X%04X%s%04X\n\r",
-	          3, er->prid, er->caid, cs_hexdump(0, er->ecm, er->ecmlen, tmp, er->ecmlen * 2 + 1), er->srvid);
-	        oscam_ser_send(client, buf, (er->ecmlen<<1)+19); // 1 + 8 + 4 + l*2 + 4 + 2
+	          3, er->prid, er->caid, cs_hexdump(0, er->ecm, er->l, tmp, er->l * 2 + 1), er->srvid);
+	        oscam_ser_send(client, buf, (er->l<<1)+19); // 1 + 8 + 4 + l*2 + 4 + 2
 	      }
 	      else
 	      {
 	        snprintf((char *)buf, 512, "%c%08X%04X%s\n\r",
-	          3, er->prid, er->caid, cs_hexdump(0, er->ecm, er->ecmlen, tmp, er->ecmlen * 2 + 1));
-	        oscam_ser_send(client, buf, (er->ecmlen<<1)+15); // 1 + 8 + 4 + l*2 + 2
+	          3, er->prid, er->caid, cs_hexdump(0, er->ecm, er->l, tmp, er->l * 2 + 1));
+	        oscam_ser_send(client, buf, (er->l<<1)+15); // 1 + 8 + 4 + l*2 + 2
 	      }
 	      free(tmp);
 	    }
       break;
     case P_ALPHA:
       buf[0]=0x80;
-      i2b_buf(2, 2+er->ecmlen, buf + 1);
+      i2b_buf(2, 2+er->l, buf + 1);
       i2b_buf(2, er->caid, buf + 3);
-      memcpy(buf+5, er->ecm, er->ecmlen);
-      oscam_ser_send(client, buf, oscam_ser_alpha_convert(buf, 5+er->ecmlen));
+      memcpy(buf+5, er->ecm, er->l);
+      oscam_ser_send(client, buf, oscam_ser_alpha_convert(buf, 5+er->l));
       break;
   }
   return(0);
@@ -1220,7 +1214,7 @@ static int32_t oscam_ser_recv_chk(struct s_client *client, uchar *dcw, int32_t *
  *	protocol structure
  */
 
-void module_serial(struct s_module *ph)
+void module_oscam_ser(struct s_module *ph)
 {
   ph->desc="serial";
   ph->type=MOD_CONN_SERIAL;

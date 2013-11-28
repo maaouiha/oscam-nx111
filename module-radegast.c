@@ -1,8 +1,5 @@
 #include "globals.h"
 #ifdef MODULE_RADEGAST
-#include "oscam-client.h"
-#include "oscam-net.h"
-#include "oscam-string.h"
 
 static int32_t radegast_send(struct s_client * client, uchar *buf)
 {
@@ -61,9 +58,9 @@ static void radegast_auth_client(IN_ADDR_T ip)
     cs_disconnect_client(cl);
   }
 
-  for (ok = 0, account = cfg.account; cfg.rad_usr && account && !ok; account = account->next)
+  for (ok=0, account=cfg.account; (cfg.rad_usr[0]) && (account) && (!ok); account=account->next)
   {
-    ok = streq(cfg.rad_usr, account->usr);
+    ok=(!strcmp(cfg.rad_usr, account->usr));
     if (ok && cs_auth_client(cl, account, NULL))
        cs_disconnect_client(cl);
   }
@@ -112,8 +109,8 @@ static void radegast_process_ecm(uchar *buf, int32_t l)
         er->caid=b2i(2, buf+i+2);
         break;
       case  3:		// ECM DATA
-        er->ecmlen = sl;
-        memcpy(er->ecm, buf+i+2, er->ecmlen);
+        er->l=sl;
+        memcpy(er->ecm, buf+i+2, er->l);
         break;
       case  6:		// PROVID (ASCII)
         n=(sl>6) ? 3 : (sl>>1);
@@ -165,11 +162,10 @@ static int32_t radegast_send_ecm(struct s_client *client, ECM_REQUEST *er, uchar
   uchar provid_buf[8];
   uchar header[22] = "\x02\x01\x00\x06\x08\x30\x30\x30\x30\x30\x30\x30\x30\x07\x04\x30\x30\x30\x38\x08\x01\x02";
   uchar *ecmbuf;
-  if (!cs_malloc(&ecmbuf, er->ecmlen + 30))
-    return -1;
+  if(!cs_malloc(&ecmbuf,er->l + 30, -1)) return -1;
 
   ecmbuf[0] = 1;
-  ecmbuf[1] = er->ecmlen + 30 - 2;
+  ecmbuf[1] = er->l + 30 - 2;
   memcpy(ecmbuf + 2, header, sizeof(header));
   for(n = 0; n < 4; n++) {
     snprintf((char*)provid_buf+(n*2), sizeof(provid_buf)-(n*2), "%02X", ((uchar *)(&er->prid))[4 - 1 - n]);
@@ -187,15 +183,15 @@ static int32_t radegast_send_ecm(struct s_client *client, ECM_REQUEST *er, uchar
   ecmbuf[4 + sizeof(header)] = er->caid >> 8;
   ecmbuf[5 + sizeof(header)] = er->caid & 0xff;
   ecmbuf[6 + sizeof(header)] = 3;
-  ecmbuf[7 + sizeof(header)] = er->ecmlen;
-  memcpy(ecmbuf + 8 + sizeof(header), er->ecm, er->ecmlen);
+  ecmbuf[7 + sizeof(header)] = er->l;
+  memcpy(ecmbuf + 8 + sizeof(header), er->ecm, er->l);
   ecmbuf[4] = er->caid >> 8;
 
   client->reader->msg_idx = er->idx;
-  n = send(client->pfd, ecmbuf, er->ecmlen + 30, 0);
+  n = send(client->pfd, ecmbuf, er->l + 30, 0);
 
   cs_debug_mask(D_TRACE,"radegast: sending ecm");
-  cs_ddump_mask(D_CLIENT, ecmbuf, er->ecmlen + 30, "ecm:");
+  cs_ddump_mask(D_CLIENT, ecmbuf, er->l + 30, "ecm:");
 
   free(ecmbuf);
 

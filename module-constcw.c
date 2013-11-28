@@ -1,9 +1,6 @@
 //FIXME Not checked on threadsafety yet; after checking please remove this line
 #include "globals.h"
 #ifdef MODULE_CONSTCW
-#include "oscam-client.h"
-#include "oscam-net.h"
-#include "oscam-string.h"
 
 int32_t pserver = 0;
 
@@ -74,8 +71,8 @@ int32_t constcw_client_init(struct s_client *client)
     client->pfd = 0;
     if (socketpair(PF_LOCAL, SOCK_STREAM, 0, fdp))
     {
-        cs_log("constcw: Socket creation failed (%s)", strerror(errno));
-        return 1;
+	cs_log("Socket creation failed (%s)", strerror(errno));
+	cs_exit(1);
     }
     client->udp_fd =fdp[0];
     pserver = fdp[1];

@@ -1,7 +1,5 @@
 #include "globals.h"
 #ifdef READER_VIACCESS
-#include "oscam-aes.h"
-#include "oscam-time.h"
 #include "reader-common.h"
 
 struct via_date {
@@ -482,14 +480,14 @@ static int32_t viaccess_do_ecm(struct s_reader * reader, const ECM_REQUEST *er, 
 				uchar *ecm88DataCW = ecm88Data;
 				int32_t cwStart = 0;
 				//int32_t cwStartRes = 0;
-				int32_t must_exit = 0;
+				int32_t exit = 0;
 				// find CW start
-				while(cwStart < curEcm88len -1 && !must_exit)
+				while(cwStart < curEcm88len -1 && !exit)
 				{
 					if(ecm88Data[cwStart] == 0xEA && ecm88Data[cwStart+1] == 0x10)
 					{
 						ecm88DataCW = ecm88DataCW + cwStart + 2;
-						must_exit = 1;
+						exit = 1;
 					}
 					cwStart++;
 				}
@@ -501,7 +499,7 @@ static int32_t viaccess_do_ecm(struct s_reader * reader, const ECM_REQUEST *er, 
 
 			while(ecm88Len>1 && ecm88Data[0]<0xA0)
 			{
-				nanoLen=ecm88Data[1]+2;
+				int32_t nanoLen=ecm88Data[1]+2;
 				if (!ecmf8Data)
 					ecmf8Data=(uchar *)ecm88Data;
 				ecmf8Len+=nanoLen;
@@ -564,8 +562,8 @@ static int32_t viaccess_do_ecm(struct s_reader * reader, const ECM_REQUEST *er, 
 			}
 		}
 		else {
-			//ecm88Data=nextEcm;
-			//ecm88Len-=curEcm88len;
+			ecm88Data=nextEcm;
+			ecm88Len-=curEcm88len;
 			rdr_debug_mask(reader, D_READER, "ECM: Unknown ECM type");
 			snprintf( ea->msglog, MSGLOGSIZE, "Unknown ECM type" );
 			return ERROR; /*Lets interupt the loop and exit, because we don't know this ECM type.*/
@@ -604,13 +602,13 @@ case 0x8A:
 case 0x8B:
 	ep->type=GLOBAL;
 	rdr_debug_mask(rdr, D_EMM, "GLOBAL");
-	return 1;
+	return TRUE;
 
 case 0x8C:
 case 0x8D:
 	ep->type=SHARED;
 	rdr_debug_mask(rdr, D_EMM, "SHARED (part)");
-	return 0;
+	return FALSE;
 
 case 0x8E:
 	ep->type=SHARED;
@@ -622,14 +620,14 @@ case 0x8E:
 	int8_t i;
 	for (i=0;i<rdr->nprov;i++) {
 		if (!memcmp(&rdr->prid[i][1], ep->hexserial, 3))
-			return 1;
+			return TRUE;
 	}
 	return(!memcmp(&rdr->sa[0][0], ep->hexserial, 3));
 
 default:
 	ep->type = UNKNOWN;
 	rdr_debug_mask(rdr, D_EMM, "UNKNOWN");
-	return 1;
+	return TRUE;
 	}
 }
 
@@ -665,6 +663,7 @@ static void viaccess_get_emm_filter(struct s_reader * rdr, uchar *filter)
 	memcpy(filter+idx+1, rdr->hexserial + 1, 4);
 	memset(filter+idx+1+16, 0xFF, 4);
 	filter[1]++;
+	idx += 32;
 
 	return;
 }
@@ -677,7 +676,7 @@ static int32_t viaccess_do_emm(struct s_reader * reader, EMM_PACKET *ep)
 	unsigned char insf4[] = { 0xca,0xf4,0x00,0x01,0x00 }; // set adf, encrypted
 	unsigned char ins18[] = { 0xca,0x18,0x01,0x01,0x00 }; // set subscription
 	unsigned char ins1c[] = { 0xca,0x1c,0x01,0x01,0x00 }; // set subscription, encrypted
-	//static const unsigned char insc8[] = { 0xca,0xc8,0x00,0x00,0x02 }; // read extended status
+	static const unsigned char insc8[] = { 0xca,0xc8,0x00,0x00,0x02 }; // read extended status
 	// static const unsigned char insc8Data[] = { 0x00,0x00 }; // data for read extended status
 
 	int32_t emmdatastart=7;
@@ -786,7 +785,7 @@ static int32_t viaccess_do_emm(struct s_reader * reader, EMM_PACKET *ep)
 	}
 
 	if (!nanoF0Data) {
-		cs_dump(ep->emm, ep->emmlen, "can't find 0xf0 in emm...");
+		cs_dump(ep->emm, ep->l, "can't find 0xf0 in emm...");
 		return ERROR; // error
 	}
 
@@ -839,7 +838,7 @@ static int32_t viaccess_do_emm(struct s_reader * reader, EMM_PACKET *ep)
 		// send subscription encrypted
 
 		if (!nano81Data) {
-			cs_dump(ep->emm, ep->emmlen, "0x92 found, but can't find 0x81 in emm...");
+			cs_dump(ep->emm, ep->l, "0x92 found, but can't find 0x81 in emm...");
 			return ERROR; // error
 		}
 
@@ -852,13 +851,10 @@ static int32_t viaccess_do_emm(struct s_reader * reader, EMM_PACKET *ep)
 		memcpy (insData + nano92Data[1] + 2 + nano81Data[1] + 2, nanoF0Data, nanoF0Data[1] + 2);
 		write_cmd(ins1c, insData);
 
-		if( (cta_res[cta_lr-2]==0x90 || cta_res[cta_lr-2]==0x91) &&
-					(cta_res[cta_lr-1]==0x00 || cta_res[cta_lr-1]==0x08) ) {
+		if( (cta_res[cta_lr-2]==0x90 && cta_res[cta_lr-1]==0x00) ) {
 			rdr_log(reader, "update successfully written");
 			rc=1; // written
 		}
-		rc=1;
-		/* don't return ERROR at this place
 		else {
 			if( cta_res[cta_lr-2]&0x1 )
 				rdr_log(reader, "update not written. Data already exists or unknown address");
@@ -870,7 +866,7 @@ static int32_t viaccess_do_emm(struct s_reader * reader, EMM_PACKET *ep)
 			}
 			//}
 			return ERROR;
-		} */
+		}
 
 	}
 
@@ -987,92 +983,42 @@ static int32_t viaccess_card_info(struct s_reader * reader)
 #ifdef HAVE_DVBAPI
 void dvbapi_sort_nanos(unsigned char *dest, const unsigned char *src, int32_t len);
 
-struct s_reassemble_viaemm_data {	
-	int32_t 	demux_id;
-	uint16_t 	caid;
-	uint32_t	provid;
-	uint16_t	pid;
-	uchar emm_global[512];
-	uint32_t emm_global_len;
-} S_REASSEMBLE_VIAEMM_DATA;
-LLIST	*ll_reassemble_viaemm_data = NULL;
+int32_t viaccess_reassemble_emm(uchar *buffer, uint32_t *len) {
+	static uchar emm_global[512];
+	static int32_t emm_global_len = 0;
 
-struct s_reassemble_viaemm_data *get_reassemble_viaemm_data(int32_t demux_index, uint16_t caid, uint32_t provid, uint16_t pid) 
-{
-	if (!ll_reassemble_viaemm_data)
-		ll_reassemble_viaemm_data = ll_create("ll_reassemble_viaemm_data");
-
-	struct s_reassemble_viaemm_data *data;
-	LL_ITER itr;
-	if (ll_count(ll_reassemble_viaemm_data) > 0) {
-		itr = ll_iter_create(ll_reassemble_viaemm_data);
-		while ((data=ll_iter_next(&itr))) {
-			if (data->demux_id == demux_index && data->caid == caid && data->provid == provid && data->pid == pid)
-				return data;
-		}
-	}
-	return NULL;
-}
-
-int8_t add_reassemble_viaemm_data(int32_t demux_index, uint16_t caid, uint32_t provid, uint16_t pid, uchar *buffer, uint32_t *len) 
-{
-	if (!ll_reassemble_viaemm_data)
-		ll_reassemble_viaemm_data = ll_create("ll_reassemble_viaemm_data");
-
-	struct s_reassemble_viaemm_data *data;
-	if (!cs_malloc(&data,sizeof(struct s_reassemble_viaemm_data)))
-		return 0;
-
-	data->demux_id 			= demux_index;
-	data->caid				= caid;
-	data->provid			= provid;
-	data->pid				= pid;
-	data->emm_global_len	=*len;
-	memcpy(data->emm_global, buffer, *len);
-	ll_append(ll_reassemble_viaemm_data, data);
-	return 1;
-}
-
-int32_t viaccess_reassemble_emm(uchar *buffer, uint32_t *len, int32_t demux_index, uint16_t caid, uint32_t provid, uint16_t pid) {
-	int32_t pos=0;
-	uint32_t i, k;
+	int32_t pos=0, i;
+	uint32_t k;
 
 	// Viaccess
 	if (*len>500) return 0;
 
-	struct s_reassemble_viaemm_data *data = get_reassemble_viaemm_data(demux_index, caid, provid, pid);
-
 	switch(buffer[0]) {
 		case 0x8c:
 		case 0x8d:
-			if (!data || !data->emm_global_len || !data->emm_global) {
-				add_reassemble_viaemm_data(demux_index, caid, provid, pid, buffer, len);
-				return 0;
-			}
 			// emm-s part 1
-			if (!memcmp(data->emm_global, buffer, *len))
+			if (!memcmp(emm_global, buffer, *len))
 				return 0;
 
-			ll_remove(ll_reassemble_viaemm_data, data);
 			// copy first part of the emm-s
-			add_reassemble_viaemm_data(demux_index, caid, provid, pid, buffer, len);
+			memcpy(emm_global, buffer, *len);
+			emm_global_len=*len;
 			//cs_ddump_mask(D_READER, buffer, len, "viaccess global emm:");
 			return 0;
 
 		case 0x8e:
 			// emm-s part 2
-			if (!data || !data->emm_global_len || !data->emm_global)
-				return 0;
+			if (!emm_global_len) return 0;
 
 			//extract nanos from emm-gh and emm-s
 			uchar emmbuf[512];
 
 			cs_debug_mask(D_DVBAPI, "[viaccess] %s: start extracting nanos", __func__);
 			//extract from emm-gh
-			for (i=3; i<data->emm_global_len; i+=data->emm_global[i+1]+2) {
+			for (i=3; i<emm_global_len; i+=emm_global[i+1]+2) {
 				//copy nano (length determined by i+1)
-				memcpy(emmbuf+pos, data->emm_global+i, data->emm_global[i+1]+2);
-				pos+=data->emm_global[i+1]+2;
+				memcpy(emmbuf+pos, emm_global+i, emm_global[i+1]+2);
+				pos+=emm_global[i+1]+2;
 			}
 
 			if (buffer[2]==0x2c) {
@@ -1102,7 +1048,7 @@ int32_t viaccess_reassemble_emm(uchar *buffer, uint32_t *len, int32_t demux_inde
 			//calculate emm length and set it on position 2
 			buffer[2]=pos-3;
 
-			cs_ddump_mask(D_DVBAPI, data->emm_global, data->emm_global_len, "[viaccess] %s: emm-gh", __func__);
+			cs_ddump_mask(D_DVBAPI, emm_global, emm_global_len, "[viaccess] %s: emm-gh", __func__);
 			cs_ddump_mask(D_DVBAPI, buffer, pos, "[viaccess] %s: assembled emm", __func__);
 
 			*len=pos;

@@ -1,9 +1,5 @@
 #include "globals.h"
 #ifdef MODULE_CAMD33
-#include "oscam-aes.h"
-#include "oscam-client.h"
-#include "oscam-net.h"
-#include "oscam-string.h"
 
 #define REQ_SIZE	4
 
@@ -49,9 +45,7 @@ static void camd33_request_emm(void)
 
   if (aureader->hexserial[0])
   {
-    cs_log("%s emm-request sent (reader=%s, caid=%04X, auprovid=%06X)",
-      username(cur_client()), aureader->label, aureader->caid,
-      aureader->auprovid ? aureader->auprovid : b2i(4, aureader->prid[0]));
+    log_emm_request(aureader);
     mbuf[0]=0;
     mbuf[1]=aureader->caid>>8;
     mbuf[2]=aureader->caid&0xff;
@@ -68,15 +62,14 @@ static void camd33_auth_client(uchar *camdbug)
   uchar *usr=NULL, *pwd=NULL;
   struct s_auth *account;
   uchar mbuf[1024];
-  struct s_client *cl = cur_client();
 
-  cl->crypted=cfg.c33_crypted;
+  cur_client()->crypted=cfg.c33_crypted;
 
-  if (cl->crypted)
-    cl->crypted = !check_ip(cfg.c33_plain, cl->ip);
+  if (cur_client()->crypted)
+    cur_client()->crypted = check_ip(cfg.c33_plain, cur_client()->ip) ? 0 : 1;
 
-  if (cl->crypted)
-    aes_set_key(cl, (char *)cfg.c33_key);
+  if (cur_client()->crypted)
+    aes_set_key((char *) cfg.c33_key);
 
   mbuf[0]=0;
   camd33_send(mbuf, 1);	// send login-request
@@ -93,14 +86,14 @@ static void camd33_auth_client(uchar *camdbug)
       memcpy(camdbug+1, mbuf, camdbug[0]=i);
   }
   for (rc=-1, account=cfg.account; (usr) && (account) && (rc<0); account=account->next)
-    if (streq((char *)usr, account->usr) && streq((char *)pwd, account->pwd))
-      rc = cs_auth_client(cl, account, NULL);
+    if ((!strcmp((char *)usr, account->usr)) && (!strcmp((char *)pwd, account->pwd)))
+      rc=cs_auth_client(cur_client(), account, NULL);
   if (!rc)
     camd33_request_emm();
   else
   {
-    if (rc<0) cs_auth_client(cl, 0, usr ? "invalid account" : "no user given");
-    cs_disconnect_client(cl);
+    if (rc<0) cs_auth_client(cur_client(), 0, usr ? "invalid account" : "no user given");
+    cs_disconnect_client(cur_client());
   }
 }
 
@@ -121,9 +114,9 @@ static void camd33_process_ecm(uchar *buf, int32_t l)
   if (!(er=get_ecmtask()))
     return;
   memcpy(&er->msgid, buf+3, 4);	// save pin
-  er->ecmlen=l-7;
+  er->l=l-7;
   er->caid=b2i(2, buf+1);
-  memcpy(er->ecm , buf+7, er->ecmlen);
+  memcpy(er->ecm , buf+7, er->l);
   get_cw(cur_client(), er);
 }
 
@@ -131,10 +124,10 @@ static void camd33_process_emm(uchar *buf, int32_t l)
 {
   EMM_PACKET epg;
   memset(&epg, 0, sizeof(epg));
-  epg.emmlen=l-7;
+  epg.l=l-7;
   memcpy(epg.caid     , buf+1, 2);
   memcpy(epg.hexserial, buf+3, 4);
-  memcpy(epg.emm      , buf+7, epg.emmlen);
+  memcpy(epg.emm      , buf+7, epg.l);
   do_emm(cur_client(), &epg);
 }
 

@@ -6,11 +6,6 @@
 #include <sys/time.h>
 
 #include "algo/minilzo.h"
-#include "oscam-failban.h"
-#include "oscam-client.h"
-#include "oscam-lock.h"
-#include "oscam-net.h"
-#include "oscam-string.h"
 
 enum {
   MSG_ECM = 0x445c,
@@ -199,13 +194,11 @@ static void gbox_compress(struct gbox_data *UNUSED(gbox), uchar *buf, int32_t un
 {
   unsigned char *tmp, *tmp2;
   *packed_len = 0;
-  if (!cs_malloc(&tmp, 0x40000)) {
-    return;
-  }
-  if (!cs_malloc(&tmp2,0x40000)) {
-    free(tmp);
-    return;
-  }
+  if(!cs_malloc(&tmp,0x40000, -1)) return;
+ 	if(!cs_malloc(&tmp2,0x40000, -1)){
+ 		free(tmp);
+ 		return;
+ 	}
 
   unpacked_len -= 12;
   memcpy(tmp2, buf + 12, unpacked_len);
@@ -214,11 +207,11 @@ static void gbox_compress(struct gbox_data *UNUSED(gbox), uchar *buf, int32_t un
 
   char work[16384];
   lzo_voidp wrkmem = &work;
-  if (!cs_malloc(&tmp2, unpacked_len * 0x1000)) {
-    free(tmp);
-    free(tmp2);
-    return;
-  }
+  if(!cs_malloc(&tmp2,unpacked_len * 0x1000, -1)){
+ 		free(tmp);
+ 		free(tmp2);
+ 		return;
+ 	}
   cs_debug_mask(D_READER, "gbox: wrkmem = %p", wrkmem);
   lzo_uint pl = 0;
   if (lzo1x_1_compress(tmp2, unpacked_len, tmp, &pl, wrkmem) != LZO_E_OK)
@@ -237,8 +230,7 @@ static void gbox_decompress(struct gbox_data *UNUSED(gbox), uchar *buf, int32_t 
 {
   uchar *tmp;
 
-  if (!cs_malloc(&tmp, 0x40000))
-    return;
+  if(!cs_malloc(&tmp,0x40000, -1)) return;
   int err;
   int len = *unpacked_len - 12;
   *unpacked_len = 0x40000;
@@ -291,14 +283,14 @@ uint32_t gbox_get_ecmchecksum(ECM_REQUEST *er)
   int32_t counter;
 
   uchar ecm[255];
-  memcpy(ecm, er->ecm, er->ecmlen);
+  memcpy(ecm, er->ecm, er->l);
 
   checksum[3] = ecm[0];
   checksum[2] = ecm[1];
   checksum[1] = ecm[2];
   checksum[0] = ecm[3];
 
-  for (counter=1; counter < (er->ecmlen/4) - 4; counter++) {
+  for (counter=1; counter < (er->l/4) - 4; counter++) {
     checksum[3] ^= ecm[counter*4];
     checksum[2] ^= ecm[counter*4+1];
     checksum[1] ^= ecm[counter*4+2];
@@ -313,7 +305,7 @@ static void gbox_handle_gsms(uint16_t peerid, char *gsms)
 {
 	cs_log("gbox: gsms received from peer %04x: %s", peerid, gsms);
 
-	if (cfg.gbox_gsms_path) {
+	if (strlen(cfg.gbox_gsms_path)) {
 		FILE *f = fopen(cfg.gbox_gsms_path, "a");
 		if (f) {
 			f//printf(f, "FROM %04X: %s\n", peerid, gsms);
@@ -389,7 +381,7 @@ static void gbox_send(struct s_client *cli, uchar *buf, int32_t l)
 //  cs_ddump_mask(D_READER, gbox->key, 4, "gbox: key before encrypt:");
 
   gbox_encrypt(buf, l, gbox->peer.key);
-  sendto(cli->udp_fd, buf, l, 0, (struct sockaddr *)&cli->udp_sa, cli->udp_sa_len);
+  sendto(cli->udp_fd, buf, l, 0, (struct sockaddr *)&cli->udp_sa, sizeof(cli->udp_sa));
 
 //  cs_ddump_mask(D_READER, gbox->key, 4, "gbox: key after encrypt:");
   cs_ddump_mask(D_READER, buf, l, "gbox: encrypted data send (%d bytes):", l);
@@ -449,8 +441,7 @@ static void gbox_send_hello(struct s_client *cli)
         int32_t i;
         for (i = 0; i < rdr->nprov; i++) {
           struct gbox_card *c;
-          if (!cs_malloc(&c, sizeof(struct gbox_card)))
-            continue;
+          if(!cs_malloc(&c,sizeof(struct gbox_card), -1)) continue;
           c->provid = rdr->caid << 16 | rdr->prid[i][0] << 8 | rdr->prid[i][1];
           ll_append(gbox->local_cards, c);
         }
@@ -617,8 +608,7 @@ static int32_t gbox_recv(struct s_client *cli, uchar *b, int32_t l)
             int32_t i;
             for (i = 0; i < ncards; i++) {
               struct gbox_card *card;
-              if (!cs_malloc(&card, sizeof(struct gbox_card)))
-                continue;
+              if(!cs_malloc(&card,sizeof(struct gbox_card), -1)) continue;
 
               card->provid = provid;
               card->slot = ptr[0];
@@ -640,9 +630,9 @@ static int32_t gbox_recv(struct s_client *cli, uchar *b, int32_t l)
           }
 
           NULLFREE(gbox->peer.hostname);
-          if (!cs_malloc(&gbox->peer.hostname, hostname_len + 1)) {
-            cs_writeunlock(&gbox->lock);
-            return -1;
+          if(!cs_malloc(&gbox->peer.hostname,hostname_len + 1, -1)){
+          	cs_writeunlock(&gbox->lock);
+          	return -1;
           }
           memcpy(gbox->peer.hostname, data + payload_len - 1 - hostname_len, hostname_len);
           gbox->peer.hostname[hostname_len] = '\0';
@@ -663,8 +653,7 @@ static int32_t gbox_recv(struct s_client *cli, uchar *b, int32_t l)
             int32_t i;
             for (i = 0; i < ncards; i++) {
               struct gbox_card *card;
-              if (!cs_malloc(&card, sizeof(struct gbox_card)))
-                continue;
+              if(!cs_malloc(&card,sizeof(struct gbox_card), -1)) continue;
 
               card->provid = provid;
               card->slot = ptr[0];
@@ -745,9 +734,9 @@ static int32_t gbox_recv(struct s_client *cli, uchar *b, int32_t l)
       ECM_REQUEST *er = get_ecmtask();
 
       struct gbox_ecm_info *ei;
-      if (!cs_malloc(&ei, sizeof(struct gbox_ecm_info))) {
-        cs_writeunlock(&gbox->lock);
-        return -1;
+      if(!cs_malloc(&ei,sizeof(struct gbox_ecm_info), -1)){
+      	cs_writeunlock(&gbox->lock);
+      	return -1;
       }
       er->src_data = ei;
 
@@ -757,25 +746,25 @@ static int32_t gbox_recv(struct s_client *cli, uchar *b, int32_t l)
       uchar *ecm = data + 18;
 
       er->idx = ++ecm_idx;
-      er->ecmlen = ecm[2] + 3;
+      er->l = ecm[2] + 3;
       er->pid = data[10] << 8 | data[11];
       er->srvid = data[12] << 8 | data[13];
       ei->extra = data[14] << 8 | data[15];
-      memcpy(er->ecm, data + 18, er->ecmlen);
+      memcpy(er->ecm, data + 18, er->l);
 
       ei->ncards = data[16];
 
-      ei->peer = ecm[er->ecmlen] << 8 | ecm[er->ecmlen + 1];
-      ei->version = ecm[er->ecmlen + 2];
-      ei->type = ecm[er->ecmlen + 4];
-      er->caid = ecm[er->ecmlen + 5] << 8 | ecm[er->ecmlen + 6];
-      er->prid = ecm[er->ecmlen + 7] << 8 | ecm[er->ecmlen + 8];
-      ei->slot = ecm[er->ecmlen + 12];
-      ei->unknwn1 = ecm[er->ecmlen + 3];
-      ei->unknwn2 = ecm[er->ecmlen + 13];
-      memcpy(ei->checksums, ecm + er->ecmlen + 14, 14);
+      ei->peer = ecm[er->l] << 8 | ecm[er->l + 1];
+      ei->version = ecm[er->l + 2];
+      ei->type = ecm[er->l + 4];
+      er->caid = ecm[er->l + 5] << 8 | ecm[er->l + 6];
+      er->prid = ecm[er->l + 7] << 8 | ecm[er->l + 8];
+      ei->slot = ecm[er->l + 12];
+      ei->unknwn1 = ecm[er->l + 3];
+      ei->unknwn2 = ecm[er->l + 13];
+      memcpy(ei->checksums, ecm + er->l + 14, 14);
 
-      cs_log("gbox: ecm received, caid=%04x. provid=%x, sid=%04x, len=%d, peer=%04x", er->caid, er->prid, er->srvid, er->ecmlen, ei->peer);
+      cs_log("gbox: ecm received, caid=%04x. provid=%x, sid=%04x, len=%d, peer=%04x", er->caid, er->prid, er->srvid, er->l, ei->peer);
       get_cw(cli, er);
     }
       break;
@@ -835,15 +824,13 @@ static void gbox_send_dcw(struct s_client *cli, ECM_REQUEST *er)
 
 static int32_t gbox_client_init(struct s_client *cli)
 {
-	if (!cfg.gbox_hostname || strlen(cfg.gbox_hostname) > 128) {
-		cs_log("gbox: error, no/invalid hostname '%s' configured in oscam.conf!",
-			cfg.gbox_hostname ? cfg.gbox_hostname : "");
+	if (!strlen(cfg.gbox_hostname)) {
+		cs_log("gbox: error, no hostname configured in oscam.conf!");
 		return -1;
 	}
 
-	if (!cfg.gbox_key || strlen(cfg.gbox_key) != 8) {
-		cs_log("gbox: error, no/invalid password '%s' configured in oscam.conf!",
-			cfg.gbox_key ? cfg.gbox_key : "");
+	if (strlen(cfg.gbox_key) != 8) {
+		cs_log("gbox: error, no/invalid password '%s' configured in oscam.conf!", cfg.gbox_key);
 		return -1;
 	}
 
@@ -851,8 +838,7 @@ static int32_t gbox_client_init(struct s_client *cli)
 		cs_log("gbox: no/invalid port configured in oscam.conf!");
 		return -1;
 	}
-  if (!cs_malloc(&cli->gbox, sizeof(struct gbox_data)))
-    return -1;
+	if(!cs_malloc(&cli->gbox,sizeof(struct gbox_data), -1)) return -1;
 
   struct gbox_data *gbox = cli->gbox;
   struct s_reader *rdr = cli->reader;
@@ -995,7 +981,7 @@ static int32_t gbox_send_ecm(struct s_client *cli, ECM_REQUEST *er, uchar *UNUSE
 
   uchar send_buf[0x2048], *ptr;
 
-  if (!er->ecmlen) return -1;
+  if (!er->l) return -1;
   er->gbox_crc = gbox_get_ecmchecksum(er);
 
   memset(send_buf, 0, sizeof(send_buf));
@@ -1013,8 +999,8 @@ static int32_t gbox_send_ecm(struct s_client *cli, ECM_REQUEST *er, uchar *UNUSE
   send_buf[16] = 0; // number of cards
   send_buf[17] = 0; // distance */
 
-  memcpy(send_buf + 18, er->ecm, er->ecmlen);
-  ptr = send_buf + 18 + er->ecmlen;
+  memcpy(send_buf + 18, er->ecm, er->l);
+  ptr = send_buf + 18 + er->l;
   *(ptr) = gbox->id >> 8;
   *(++ptr) = gbox->id;
   *(++ptr) = gbox->ver;

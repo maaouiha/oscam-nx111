@@ -209,13 +209,6 @@ azbox:
 		USE_AZBOX=1 \
 		$(MAKEFLAGS)
 
-mca:
-	$(MAKE) --no-print-directory \
-		CROSS=arm-none-linux-gnueabi- \
-		CONF_DIR=/var/mca/d1 \
-		USE_MCA=1 \
-		$(MAKEFLAGS)
-
 cool:
 	$(MAKE) --no-print-directory \
 		CROSS=arm-cx2450x-linux-gnueabi- \
@@ -229,41 +222,7 @@ coolstream: cool
 dockstar:
 	$(MAKE) --no-print-directory \
 		CROSS=arm-openwrt-linux-uclibcgnueabi- \
+		EXTRA_FLAGS=-DDOCKSTAR \
+		PLUS_TARGET=-dockstar \
 		CONF_DIR=/jffs/etc/config/oscam \
-		$(MAKEFLAGS)
-
-qboxhd:
-	$(MAKE) --no-print-directory \
-		CROSS=sh4-linux- \
-		EXTRA_FLAGS=-DQBOXHD \
-		PLUS_TARGET=-qboxhd \
-		CONF_DIR=/var/tuxbox/config \
-		$(MAKEFLAGS)
-
-static:
-	$(MAKE) --no-print-directory \
-		EXTRA_FLAGS=-static \
-		EXTRA_TARGET=-static \
-		$(MAKEFLAGS)
-
-static-libusb:
-	$(MAKE) --no-print-directory \
-		USE_LIBUSB=1 \
-		LIBUSB_LIB=/usr/lib/libusb-1.0.a \
-		EXTRA_TARGET=-static \
-		$(MAKEFLAGS)
-
-static-libcrypto:
-	$(MAKE) --no-print-directory \
-		USE_LIBCRYPTO=1 \
-		LIBCRYPTO_LIB=/usr/lib/libcrypto.a \
-		EXTRA_TARGET=-static \
-		$(MAKEFLAGS)
-
-static-ssl:
-	$(MAKE) --no-print-directory \
-		USE_SSL=1 \
-		SSL_LIB=/usr/lib/libssl.a \
-		LIBCRYPTO_LIB=/usr/lib/libcrypto.a \
-		EXTRA_TARGET=-static \
 		$(MAKEFLAGS)

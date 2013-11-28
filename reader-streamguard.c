@@ -79,7 +79,7 @@ static int32_t streamguard_do_ecm(struct s_reader *reader, const ECM_REQUEST *er
   char *tmp;
 
   if((ecm_len = check_sct_len(er->ecm, 3)) < 0) return ERROR;
-	if(cs_malloc(&tmp, ecm_len * 3 + 1)){
+	if(cs_malloc(&tmp, ecm_len * 3 + 1, -1)){
 		cs_debug_mask(D_IFD, "ECM: %s", cs_hexdump(1, er->ecm, ecm_len, tmp, ecm_len * 3 + 1));
 		free(tmp);
 	}
@@ -145,7 +145,7 @@ static int32_t streamguard_do_ecm(struct s_reader *reader, const ECM_REQUEST *er
 static int32_t streamguard_get_emm_type(EMM_PACKET *ep, struct s_reader *UNUSED(reader))
 {
   ep->type = UNKNOWN;
-  return 1;
+  return TRUE;
 }
 
 void streamguard_get_emm_filter(struct s_reader *UNUSED(reader), uchar *UNUSED(filter))

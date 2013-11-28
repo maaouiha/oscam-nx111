@@ -9,10 +9,6 @@
 #define WEBIF
 #endif
 
-#ifndef TOUCH
-#define TOUCH
-#endif
-
 #ifndef WITH_SSL
 //#define WITH_SSL
 #endif
@@ -41,10 +37,6 @@
 
 #ifndef LCDSUPPORT
 #define LCDSUPPORT
-#endif
-
-#ifndef LEDSUPPORT
-//#define LEDSUPPORT
 #endif
 
 #ifndef IPV6SUPPORT
@@ -106,10 +98,6 @@
 #define MODULE_PANDORA
 #endif
 
-#ifndef MODULE_GHTTP
-//#define MODULE_GHTTP
-#endif
-
 //
 // CARDREADER
 //
@@ -119,7 +107,6 @@
 #endif
 
 #ifdef WITH_CARDREADER
-
 #ifndef READER_NAGRA
 #define READER_NAGRA
 #endif
@@ -164,63 +151,9 @@
 #define READER_BULCRYPT
 #endif
 
-#ifndef CARDREADER_PHOENIX
-#define CARDREADER_PHOENIX
-#endif
-
-#ifndef CARDREADER_INTERNAL
-#define CARDREADER_INTERNAL
-#endif
-
-#ifndef CARDREADER_MP35
-#define CARDREADER_MP35
-#endif
-
-#ifndef CARDREADER_SC8IN1
-#define CARDREADER_SC8IN1
-#endif
-
-#ifndef CARDREADER_SMARGO
-#define CARDREADER_SMARGO
-#endif
-
-#ifndef CARDREADER_DB2COM
-#define CARDREADER_DB2COM
-#endif
-
-#ifdef WITH_PCSC
-#ifndef CARDREADER_PCSC
-#define CARDREADER_PCSC
-#endif
-#endif
-
-#ifdef WITH_LIBUSB
-#ifndef CARDREADER_SMART
-#define CARDREADER_SMART
-#endif
-#endif
-
-// CARDREADER_INTERNAL_{AZBOX,COOLAPI,SCI} are internal variables
-// do not touch them
-#if   defined(CARDREADER_INTERNAL) && defined(WITH_AZBOX)
-#define CARDREADER_INTERNAL_AZBOX
-#elif defined(CARDREADER_INTERNAL) && defined(WITH_COOLAPI)
-#define CARDREADER_INTERNAL_COOLAPI
-#elif defined(CARDREADER_INTERNAL)
-#define CARDREADER_INTERNAL_SCI
-#endif
-
-#ifdef WITH_STAPI
-#ifndef CARDREADER_STAPI
-#define CARDREADER_STAPI
-#endif
-#endif
-
-
-#endif // WITH_CARDREADER
-
 #ifndef CS_CACHEEX
 #define CS_CACHEEX
+#endif
 #endif
 
 #endif //OSCAM_CONFIG_H_

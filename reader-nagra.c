@@ -1,6 +1,5 @@
 #include "globals.h"
 #ifdef READER_NAGRA
-#include "oscam-time.h"
 #include "reader-common.h"
 #include "cscrypt/idea.h"
 #include <termios.h>
@@ -39,14 +38,14 @@ static char *nagra_datetime(struct s_reader *rdr, uint8_t *ndays, int32_t offset
 	struct tm tms;
 	memset(&tms, 0, sizeof(tms));
 	int32_t days = (ndays[0] << 8 | ndays[1]) + offset;
-	int32_t sec = 0;
+	int32_t time = 0;
 	if (!rdr->is_tiger)
-		sec = (ndays[2] << 8 | ndays[3]);
+		time = (ndays[2] << 8 | ndays[3]);
 	if (days > 0x41B4 && sizeof(time_t) < 8) // to overcome 32-bit systems limitations
 		days = 0x41A2;                   // 01-01-2038
 	tms.tm_year = 92;
 	tms.tm_mday = days + 1;
-	tms.tm_sec = sec;
+	tms.tm_sec = time;
 	time_t ut = mktime(&tms);
 	if (t)
 		*t = ut;
@@ -178,7 +177,7 @@ static int32_t NegotiateSessionKey_Tiger(struct s_reader * reader)
 	unsigned char sk[16];
 	unsigned char tmp[104];
 	unsigned char idea_sig[16];
-	unsigned char rnd[88];
+	unsigned char random[88];
 	char tmp2[17];
 
 	if(!do_cmd(reader, 0xd1,0x02,0x51,0xd2,NULL,cta_res,&cta_lr))
@@ -259,9 +258,9 @@ static int32_t NegotiateSessionKey_Tiger(struct s_reader * reader)
 	rdr_log_sensitive(reader, "type: NAGRA, caid: %04X, IRD ID: {%s}",reader->caid, cs_hexdump(1,reader->irdId,4, tmp2, sizeof(tmp2)));
   	rdr_log(reader, "ProviderID: %s", cs_hexdump(1,reader->prid[0],4, tmp2, sizeof(tmp2)));
 
-	memset(rnd, 0, 88);
-	memcpy(rnd, sk,16);
-	ReverseMem(rnd, 88);
+	memset(random, 0, 88);
+	memcpy(random, sk,16);
+	ReverseMem(random, 88);
 
 
 	BN_CTX *ctx3 = BN_CTX_new();
@@ -274,7 +273,7 @@ static int32_t NegotiateSessionKey_Tiger(struct s_reader * reader)
 	BIGNUM *bnPT3 = BN_CTX_get(ctx3);
 	BN_bin2bn(d1_rsa_modulo, 88, bnN3);
 	BN_bin2bn(vFixed+4, 1, bnE3);
-	BN_bin2bn(rnd, 88, bnCT3);
+	BN_bin2bn(random, 88, bnCT3);
 	BN_mod_exp(bnPT3, bnCT3, bnE3, bnN3, ctx3);
 	memset(d2_data, 0, 88);
 	BN_bn2bin(bnPT3, d2_data + (88-BN_num_bytes(bnPT3)));
@@ -334,15 +333,12 @@ static int32_t NegotiateSessionKey(struct s_reader * reader)
 
 	if (!reader->has_dt08) // if we have no valid dt08 calc then we use rsa from config and hexserial for calc of sessionkey
 	{
-		rdr_debug_mask(reader, D_READER, "No valid DT08 calc using rsa from config and serial from card");
 		memcpy(reader->plainDT08RSA, reader->rsa_mod, 64);
 		memcpy(reader->signature,reader->nagra_boxkey, 8);
 	}
 
-	if ((reader->is_n3_na) && (!do_cmd(reader, 0x29,0x02,0xA9,0x04, NULL,cta_res,&cta_lr))){
-		rdr_debug_mask(reader, D_READER, "Nagra3: CMD$29 failed");
+	if ((reader->is_n3_na) && (!do_cmd(reader, 0x29,0x02,0xA9,0x04, NULL,cta_res,&cta_lr)))
 		return ERROR;
-	}
 
 	memcpy(tmp, reader->irdId, 4);
 	tmp[4]=0; //keynr 0
@@ -571,11 +567,10 @@ static int32_t ParseDataType(struct s_reader * reader, unsigned char dt, unsigne
 
 			reader->caid =(SYSTEM_NAGRA|cta_res[11]);
 			memcpy(reader->irdId,cta_res+14,4);
-			if(reader->csystem.active){			// do not output on init but only afterwards in card_info
-				rdr_log_sensitive(reader, "IRD ID: {%s}", cs_hexdump(1, reader->irdId, 4, ds, sizeof(ds)));
-				nagra_datetime(reader, cta_res+24, 0, ds, &reader->card_valid_to);
-				rdr_log(reader, "active to: %s", ds);
-			}
+			rdr_log_sensitive(reader, "type: NAGRA, caid: %04X, IRD ID: {%s}",reader->caid, cs_hexdump(1, reader->irdId, 4, ds, sizeof(ds)));
+			rdr_log(reader, "ProviderID: %s", cs_hexdump(1, reader->prid[0], 4, ds, sizeof(ds)));
+			nagra_datetime(reader, cta_res+24, 0, ds, &reader->card_valid_to);
+			rdr_log(reader, "active to: %s", ds);
 			return OK;
      		}
    		case TIERS:
@@ -630,6 +625,7 @@ static int32_t nagra2_card_init(struct s_reader * reader, ATR *newatr)
 {
 	get_atr;
 	def_resp;
+	char tmp_dbg[13];
 	memset(reader->rom, 0, 15);
 	reader->is_pure_nagra = 0;
 	reader->is_tiger = 0;
@@ -692,6 +688,7 @@ static int32_t nagra2_card_init(struct s_reader * reader, ATR *newatr)
 			return ERROR;
 		}
 		memcpy(reader->hexserial+2, cta_res+2, 4);
+		rdr_debug_mask_sensitive(reader, D_READER, "SER:  {%s}", cs_hexdump(1, reader->hexserial+2, 4, tmp_dbg, sizeof(tmp_dbg)));
 		memcpy(reader->sa[0], cta_res+2, 2);
 
 		if(!GetDataType(reader, DT01,0x0E,MAX_REC)) return ERROR;
@@ -705,6 +702,17 @@ static int32_t nagra2_card_init(struct s_reader * reader, ATR *newatr)
 		if(!GetDataType(reader, 0x04,0x44,MAX_REC)) return ERROR;
 		rdr_debug_mask(reader, D_READER, "DT04 DONE");
 		CamStateRequest(reader);
+
+		if (!memcmp(reader->rom+5, "181", 3)==0) //dt05 is not supported by rom181
+		{
+			rdr_log(reader, "-----------------------------------------");
+			rdr_log(reader, "|id  |tier    |valid from  |valid to    |");
+		  	rdr_log(reader, "+----+--------+------------+------------+");
+			if(!GetDataType(reader, TIERS,0x57,MAX_REC)) return ERROR;
+			rdr_log(reader, "-----------------------------------------");
+			CamStateRequest(reader);
+		}
+
 		if(!GetDataType(reader, DT06,0x16,MAX_REC)) return ERROR;
 		rdr_debug_mask(reader, D_READER, "DT06 DONE");
 		CamStateRequest(reader);
@@ -768,7 +776,7 @@ static int32_t reccmp2(const void *r1, const void *r2)
 static int32_t nagra2_card_info(struct s_reader * reader)
 {
 	int32_t i;
-	char currdate[11], tmp[64];
+        char currdate[11], tmp[13];
 	rdr_log(reader, "ROM:    %c %c %c %c %c %c %c %c", reader->rom[0], reader->rom[1], reader->rom[2],reader->rom[3], reader->rom[4], reader->rom[5], reader->rom[6], reader->rom[7]);
 	rdr_log(reader, "REV:    %c %c %c %c %c %c", reader->rom[9], reader->rom[10], reader->rom[11], reader->rom[12], reader->rom[13], reader->rom[14]);
 	rdr_log_sensitive(reader, "SER:    {%s}", cs_hexdump(1, reader->hexserial+2, 4, tmp, sizeof(tmp)));
@@ -778,7 +786,6 @@ static int32_t nagra2_card_info(struct s_reader * reader)
 	{
           rdr_log(reader, "Prv.ID: %s",cs_hexdump(1, reader->prid[i], 4, tmp, sizeof(tmp)));
 	}
-	cs_clear_entitlement(reader); //reset the entitlements
         if(reader->is_tiger)
         {
 	  rdr_log(reader, "Activation Date : %s", nagra_datetime(reader, reader->ActivationDate, 0, currdate, 0));
@@ -815,6 +822,7 @@ static int32_t nagra2_card_info(struct s_reader * reader)
                        if (cta_res[j] == 0x80 && cta_res[j+6] != 0x00)
                        {
                           int32_t val_offs = 0;
+                          char tmp[52];
                           nagra_datetime(reader, &cta_res[j+6], 0, records[num_records].date2, 0);
 
                           switch (cta_res[j+1])
@@ -941,33 +949,7 @@ static int32_t nagra2_card_info(struct s_reader * reader)
               else
                 rdr_log(reader, "Credit : %3d euro", balance);
            }
-        } else {
-        	def_resp;
-        	char tmp_dbg[13];
-        	CamStateRequest(reader);
-					if(!do_cmd(reader, 0x12,0x02,0x92,0x06,0,cta_res,&cta_lr))
-					{
-						rdr_debug_mask(reader, D_READER, "get serial failed");
-						return ERROR;
-					}
-					memcpy(reader->hexserial+2, cta_res+2, 4);
-					rdr_debug_mask_sensitive(reader, D_READER, "SER:  {%s}", cs_hexdump(1, reader->hexserial+2, 4, tmp_dbg, sizeof(tmp_dbg)));
-					memcpy(reader->sa[0], cta_res+2, 2);
-					reader->nprov = 1;
-					if(!GetDataType(reader, IRDINFO,0x39,MAX_REC)) return ERROR;
-					rdr_debug_mask(reader, D_READER, "IRDINFO DONE");
-					CamStateRequest(reader);
-			
-					if (!memcmp(reader->rom+5, "181", 3)==0) //dt05 is not supported by rom181
-					{
-						rdr_log(reader, "-----------------------------------------");
-						rdr_log(reader, "|id  |tier    |valid from  |valid to    |");
-					  	rdr_log(reader, "+----+--------+------------+------------+");
-						if(!GetDataType(reader, TIERS,0x57,MAX_REC)) return ERROR;
-						rdr_log(reader, "-----------------------------------------");
-						CamStateRequest(reader);
-					}
-	}
+        }
 	rdr_log(reader, "ready for requests");
 	return OK;
 }
@@ -1028,7 +1010,7 @@ static int32_t nagra2_do_ecm(struct s_reader * reader, const ECM_REQUEST *er, st
 			}
 			else if (reader->ecmcommandcache[0] != er->ecm[3]){
                     rdr_debug_mask(reader, D_READER, "Warning: received an abnominal ecm command %02X for caid: %04X, ignoring!", er->ecm[3], reader->caid);
-                    memset(ea, 0, sizeof(struct s_ecm_answer)); // give it back 00000000 to not disturb the loadbalancer for valid ecm requests on this channel.
+                    memset(ea, 0, sizeof(ea)); // give it back 00000000 to not disturb the loadbalancer for valid ecm requests on this channel.
                     return OK;
                 }
 				
@@ -1101,7 +1083,7 @@ static int32_t nagra2_do_ecm(struct s_reader * reader, const ECM_REQUEST *er, st
 	return ERROR;
 }
 
-int32_t nagra2_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr) //returns 1 if shared emm matches SA, unique emm matches serial, or global or unknown
+int32_t nagra2_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr) //returns TRUE if shared emm matches SA, unique emm matches serial, or global or unknown
 {
 	switch (ep->emm[0]) {
 		case 0x83:
@@ -1120,10 +1102,10 @@ int32_t nagra2_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr) //returns 1 i
 			}
 		case 0x82:
 			ep->type = GLOBAL;
-			return 1;
+			return TRUE;
 		default:
 			ep->type = UNKNOWN;
-			return 1;
+			return TRUE;
 	}
 }
 
@@ -1163,6 +1145,7 @@ static void nagra2_get_emm_filter(struct s_reader * rdr, uchar *filter)
 	filter[idx+5]    = 0x00;
 	memset(filter+idx+0+16, 0xFF, 6);
 	filter[1]++;
+	idx += 32;
 
 	return;
 }

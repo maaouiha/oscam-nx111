@@ -6,7 +6,7 @@
 static void dimeno_PostProcess_Decrypt(struct s_reader * reader, unsigned char *rxbuff, unsigned char *cw)
 {
   unsigned char tag,len,len2;
-  bool valid_0x55=0;
+  bool valid_0x55=FALSE;
   unsigned char *body;
   unsigned char buffer[0x10];
   int32_t a=0x13;
@@ -20,7 +20,7 @@ static void dimeno_PostProcess_Decrypt(struct s_reader * reader, unsigned char *
     {
       case 0x55:{
         if(body[0]==0x84){      //Tag 0x56 has valid data...
-          valid_0x55=1;
+          valid_0x55=TRUE;
         }
       }break;
       case 0x56:{
@@ -39,7 +39,7 @@ static void dimeno_PostProcess_Decrypt(struct s_reader * reader, unsigned char *
 static void do_post_dw_hash(struct s_reader *reader, unsigned char *cw, const unsigned char *ecm_header_data)
 {
   int32_t i, ecmi, ecm_header_count;
-  unsigned char buffer[0x85]; //original 0x80 but with 0x7D mask applied +8 bytes cw it was still to small
+  unsigned char buffer[0x80];
   unsigned char md5tmp[MD5_DIGEST_LENGTH];
   static const uint16_t Hash3[] = {0x0123,0x4567,0x89AB,0xCDEF,0xF861,0xCB52};
   static const unsigned char Hash4[] = {0x0B,0x04,0x07,0x08,0x05,0x09,0x0B,0x0A,0x07,0x02,0x0A,0x05,0x04,0x08,0x0D,0x0F};
@@ -149,14 +149,14 @@ static void do_post_dw_hash(struct s_reader *reader, unsigned char *cw, const un
       {                         //b0 01
       case 1:
         {
-          uint16_t hk[8], r, j, m = 0;
-          for (r = 0; r < 6; r++)
-            hk[2 + r] = Hash3[r];
-          for (r = 0; r < 2; r++)
+          uint16_t hk[8], i, j, m = 0;
+          for (i = 0; i < 6; i++)
+            hk[2 + i] = Hash3[i];
+          for (i = 0; i < 2; i++)
           {
             for (j = 0; j < 0x48; j += 2)
             {
-              if (r)
+              if (i)
               {
                 hk[0] = ((hk[3] & hk[5]) | ((~hk[5]) & hk[4]));
               }
@@ -183,13 +183,13 @@ static void do_post_dw_hash(struct s_reader *reader, unsigned char *cw, const un
               m = (m + 1) & 0x3F;
             }
           }
-          for (r = 0; r < 6; r++)
+          for (i = 0; i < 6; i++)
           {
-            hk[2 + r] += Hash3[r];
+            hk[2 + i] += Hash3[i];
           }
-          for (r = 0; r < 7; r++)
+          for (i = 0; i < 7; i++)
           {
-            cw[r] = hk[2 + (r >> 1)] >> ((r & 1) << 3);
+            cw[i] = hk[2 + (i >> 1)] >> ((i & 1) << 3);
           }
           cw[3] = (cw[0] + cw[1] + cw[2]) & 0xFF;
           cw[7] = (cw[4] + cw[5] + cw[6]) & 0xFF;
@@ -200,8 +200,8 @@ static void do_post_dw_hash(struct s_reader *reader, unsigned char *cw, const un
         {
           memset(buffer, 0, sizeof(buffer));
           memcpy(buffer, cw, 8);
-          memcpy(buffer + 8, &ecm_header_data[ecmi + 3], ecm_header_data[ecmi]&0x7D);
-          MD5(buffer, 8 + (ecm_header_data[ecmi]&0x7D), md5tmp);
+          memcpy(buffer + 8, &ecm_header_data[ecmi + 3], ecm_header_data[ecmi] - 2);
+          MD5(buffer, 8 + ecm_header_data[ecmi] - 2, md5tmp);
           memcpy(cw, md5tmp, 8);
           rdr_ddump_mask(reader, D_READER, cw, 8, "Postprocessed Case 3 DW:");
           break;
@@ -247,17 +247,19 @@ static void vg2_read_tiers(struct s_reader * reader)
 
   // some cards start real tiers info in middle of tier info
   // and have blank tiers between old tiers and real tiers eg 09AC
-  int32_t starttier = reader->card_tierstart;
-  bool stopemptytier = 1;
-  if (!starttier)
-    stopemptytier = 0;
+  int32_t starttier;
+  bool stopemptytier = TRUE;
+  if((starttier = reader->card_tierstart) == -1){
+    stopemptytier = FALSE;
+    starttier = 0;
+  }
 
   // check to see if specified start tier is blank and if blank, start at 0 and ignore blank tiers
   ins76[2]=starttier;
   l=do_cmd(reader,ins76,NULL,NULL,cta_res);
   if(l<0 || !status_ok(cta_res+l)) return;
   if(cta_res[2]==0 && cta_res[3]==0 ){
-    stopemptytier = 0;
+    stopemptytier = FALSE;
     starttier = 0;
   }
 
@@ -269,18 +271,23 @@ static void vg2_read_tiers(struct s_reader * reader)
     if(l<0 || !status_ok(cta_res+l)) return;
     if(cta_res[2]==0 && cta_res[3]==0 && stopemptytier) return;
     if(cta_res[2]!=0 || cta_res[3]!=0) {
+      int32_t y,m,d,H,M,S;
       char tiername[83];
+      rev_date_calc(&cta_res[4],&y,&m,&d,&H,&M,&S,reader->card_baseyear);
       uint16_t tier_id = (cta_res[2] << 8) | cta_res[3];
+
       // add entitlements to list
       struct tm timeinfo;
       memset(&timeinfo, 0, sizeof(struct tm));
-      rev_date_calc_tm(&cta_res[4],&timeinfo,reader->card_baseyear);
+      timeinfo.tm_year = y - 1900; //tm year starts at 1900
+      timeinfo.tm_mon = m - 1; //tm month starts with 0
+      timeinfo.tm_mday = d;
       cs_add_entitlement(reader, reader->caid, b2ll(4, reader->prid[0]), tier_id, 0, 0, mktime(&timeinfo), 4);
 
       if(!stopemptytier){
         rdr_debug_mask(reader, D_READER, "tier: %04x, tier-number: 0x%02x",tier_id,i);
       }
-      rdr_log(reader, "tier: %04x, expiry date: %04d/%02d/%02d-%02d:%02d:%02d %s",tier_id,timeinfo.tm_year+1900,timeinfo.tm_mon+1,timeinfo.tm_mday,timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec,get_tiername(tier_id, reader->caid, tiername));
+      rdr_log(reader, "tier: %04x, expiry date: %04d/%02d/%02d-%02d:%02d:%02d %s",tier_id,y,m,d,H,M,S,get_tiername(tier_id, reader->caid, tiername));
     }
   }
 }
@@ -361,6 +368,8 @@ static int32_t videoguard2_card_init(struct s_reader * reader, ATR *newatr)
   }
 
 
+  unsigned char ins36[5] = { 0xD0,0x36,0x00,0x00,0x00 };
+  static const unsigned char ins5e[5] = { 0xD0,0x5E,0x00,0x0C,0x02 };
   unsigned char boxID [4];
 
   if (reader->boxid > 0) {
@@ -370,16 +379,9 @@ static int32_t videoguard2_card_init(struct s_reader * reader, ATR *newatr)
         boxID[i] = (reader->boxid >> (8 * (3 - i))) % 0x100;
     }
   } else {
-    unsigned char ins36[5] = { 0xD0,0x36,0x00,0x00,0x00 };
-    static const unsigned char ins5e[5] = { 0xD0,0x5E,0x00,0x0C,0x02 };
-
     /* we can try to get the boxid from the card */
     int32_t boxidOK=0;
-    l=read_cmd_len(reader,ins36);
-    if(l > 0) {
-      ins36[4] = l;
-    }
-    else if(cmd_exists(reader,ins5e)) {
+    if((ins36[4]=read_cmd_len(reader,ins36))==0 && cmd_exists(reader,ins5e)) {
         if(!write_cmd_vg(ins5e,NULL) || !status_ok(cta_res+2)){
           rdr_log(reader, "classD0 ins5e: failed");
         } else {
@@ -421,8 +423,8 @@ static int32_t videoguard2_card_init(struct s_reader * reader, ATR *newatr)
               i+=5;
               break;
             case 0xF3: /* boxID */
-              memcpy(boxID,buff+i+1,sizeof(boxID));
-              boxidOK=1;
+                  memcpy(boxID,buff+i+1,sizeof(boxID));
+                  boxidOK=1;
               i+=5;
               break;
             case 0xF6:
@@ -547,7 +549,7 @@ static int32_t videoguard2_card_init(struct s_reader * reader, ATR *newatr)
       rdr_log(reader, "No TA1 change for this card is possible by ins7E11");
     } else {
       ins742b[4]=l;
-      bool ta1ok=0;
+      bool ta1ok=FALSE;
 
       if(!write_cmd_vg(ins742b,NULL) || !status_ok(cta_res+ins742b[4])) {  //get supported TA1 bytes
         rdr_log(reader, "classD0 ins742b: failed");
@@ -557,12 +559,12 @@ static int32_t videoguard2_card_init(struct s_reader * reader, ATR *newatr)
   
         for (i=2; i < l; i++) {
           if (cta_res[i]==reader->ins7E11[0x00]) {
-            ta1ok=1;
+            ta1ok=TRUE;
             break;
           }
         }
       }
-      if(ta1ok==0) {
+      if(ta1ok==FALSE) {
         rdr_log(reader, "The value %02X of ins7E11 is not supported,try one between %02X and %02X",reader->ins7E11[0x00],cta_res[2],cta_res[ins742b[4]-1]);
       } else {
         static const uint8_t ins7E11[5] = { 0xD0,0x7E,0x11,0x00,0x01 };
@@ -576,16 +578,16 @@ static int32_t videoguard2_card_init(struct s_reader * reader, ATR *newatr)
           return ERROR;
         }
         else {
-          unsigned char TA1;
+          BYTE TA1;
     
           if (ATR_GetInterfaceByte (newatr, 1, ATR_INTERFACE_BYTE_TA, &TA1) == ATR_OK) {
             if (TA1 != reader->ins7E11[0x00]) {
               rdr_log(reader, "classD0 ins7E11: Scheduling card reset for TA1 change from %02X to %02X", TA1, reader->ins7E11[0x00]);
               reader->ins7e11_fast_reset = 1;
     #ifdef WITH_COOLAPI
-              if (reader->typ == R_MOUSE || reader->typ == R_SC8in1 || reader->typ == R_SMART || reader->typ == R_INTERNAL) {
+              if (reader->typ == R_MOUSE || reader->typ == R_SC8in1 || reader->typ == R_SMART || reader->typ == R_PCSC || reader->typ == R_INTERNAL) {
     #else
-              if (reader->typ == R_MOUSE || reader->typ == R_SC8in1 || reader->typ == R_SMART) {
+              if (reader->typ == R_MOUSE || reader->typ == R_SC8in1 || reader->typ == R_SMART || reader->typ == R_PCSC ) {
     #endif
                 add_job(reader->client, ACTION_READER_RESET_FAST, NULL, 0);
               }

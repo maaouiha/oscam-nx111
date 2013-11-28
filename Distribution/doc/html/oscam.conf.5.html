@@ -54,12 +54,10 @@ possible variables:
 <BR>&nbsp;&nbsp;<B>s</B>&nbsp;=&nbsp;service&nbsp;ID
 <BR>&nbsp;&nbsp;<B>l</B>&nbsp;=&nbsp;length
 <BR>&nbsp;&nbsp;<B>h</B>&nbsp;=&nbsp;checksum
-<BR>&nbsp;&nbsp;<B>e</B>&nbsp;=&nbsp;CSP&nbsp;hash
-<BR>&nbsp;&nbsp;<B>w</B>&nbsp;=&nbsp;CW
 <P>
 use a value as prefix to hide variable with this value, control characters will be escaped by &quot;\&quot;
 <P>
-<BR>&nbsp;example:&nbsp;ecmfmt&nbsp;=&nbsp;c&amp;0p/i/d/s/l:h.e_w
+<BR>&nbsp;example:&nbsp;ecmfmt&nbsp;=&nbsp;c&amp;0p/i/d/s/l:h
 <BR>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(hide&nbsp;provider&nbsp;ID&nbsp;if&nbsp;0)
 </DL>
 
@@ -236,9 +234,16 @@ maximum CWs in cache, default:1000
 
 <P>
 
+<B>cacheexwaittime</B> = <B>milli-seconds</B>
+<DL COMPACT><DT><DD>
+cache waiting time in milli-seconds for cache exchange, default:50
+</DL>
+
+<P>
+
 <B>cacheexwaittime</B> = <B>delay</B>
 <DL COMPACT><DT><DD>
-wait time for a cache exchange entry in milli-seconds, default:50
+maximum wait time for a cache exchange entry in milli-seconds, default:50
 </DL>
 
 <P>
@@ -500,27 +505,6 @@ restrict the reader count to limit during load balancing learning:
 
 <P>
 
-<B>lb_auto_timeout</B> = <B>0</B>|<B>1</B>
-<DL COMPACT><DT><DD>
-1 = enable automatic timeout based on load balancing statistics, default:0
-</DL>
-
-<P>
-
-<B>lb_auto_timeout_p</B> = <B>percent</B>
-<DL COMPACT><DT><DD>
-percent added to average time as timeout time, default:30
-</DL>
-
-<P>
-
-<B>lb_auto_timeout_t</B> = <B>milli seconds</B>
-<DL COMPACT><DT><DD>
-minimal time added to average time as timeout time, default:300
-</DL>
-
-<P>
-
 <B>lb_auto_betatunnel</B> = <B>0</B>|<B>1</B>
 <DL COMPACT><DT><DD>
 1 = enable automatic Betacrypt tunneling detection for CAIDs 1801, 1833, 1834, and 1835 for load balancing, Betacrypt defintion in <B>oscam.user</B> with <B>betatunnel</B> will be prefered, default:1
@@ -528,29 +512,9 @@ minimal time added to average time as timeout time, default:300
 
 <P>
 
-<B>lb_auto_betatunnel_mode</B> = <B>0</B>|<B>1</B>|<B>2</B>
+<B>lb_auto_betatunnel_prefer_beta</B> = <B>time factor</B>
 <DL COMPACT><DT><DD>
-set mode for automatic Betacrypt tunneling:
-<P>
-<BR>&nbsp;<B>0</B>&nbsp;=&nbsp;CAID&nbsp;18XX&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;17X2&nbsp;only&nbsp;(default)
-<BR>&nbsp;<B>1</B>&nbsp;=&nbsp;CAID&nbsp;18XX&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;17X2&nbsp;and&nbsp;CAID&nbsp;17X2&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;18XX&nbsp;(CAID&nbsp;1833/1801)
-<BR>&nbsp;<B>2</B>&nbsp;=&nbsp;CAID&nbsp;18XX&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;17X2&nbsp;and&nbsp;CAID&nbsp;17X2&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;18XX&nbsp;(CAID&nbsp;1833/1834)
-<BR>&nbsp;<B>3</B>&nbsp;=&nbsp;CAID&nbsp;18XX&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;17X2&nbsp;and&nbsp;CAID&nbsp;17X2&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;18XX&nbsp;(CAID&nbsp;1833/1835)
-<BR>&nbsp;<B>4</B>&nbsp;=&nbsp;CAID&nbsp;17X2&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;18XX&nbsp;(CAID&nbsp;1833/1801&nbsp;only)
-<BR>&nbsp;<B>5</B>&nbsp;=&nbsp;CAID&nbsp;17X2&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;18XX&nbsp;(CAID&nbsp;1833/1834&nbsp;only)
-<BR>&nbsp;<B>6</B>&nbsp;=&nbsp;CAID&nbsp;17X2&nbsp;tunneling&nbsp;to&nbsp;CAID&nbsp;18XX&nbsp;(CAID&nbsp;1833/1835&nbsp;only)
-</DL>
-
-<P>
-
-<B>lb_auto_betatunnel_prefer_beta</B> = <B>direction</B>
-<DL COMPACT><DT><DD>
-set direction for automatic Betacrypt/Nagravision selection:
-<P>
-<BR>&nbsp;<B>&nbsp;&nbsp;0</B>&nbsp;=&nbsp;disabled&nbsp;(default)
-<BR>&nbsp;<B>&nbsp;&nbsp;1</B>&nbsp;=&nbsp;always&nbsp;Betacrypt
-<BR>&nbsp;<B>105</B>&nbsp;=&nbsp;represents&nbsp;the&nbsp;middle
-<BR>&nbsp;<B>200</B>&nbsp;=&nbsp;always&nbsp;Nagravision
+set automatic Betacrypt tunneling time factor prefering Betacrypt over Nagravision in percent, 0 = always Betacrypt, 100 = always Nagravision, default: 50
 </DL>
 
 <A NAME="lbAF">&nbsp;</A>
@@ -583,7 +547,7 @@ unsecured monitor connection, default:none
 
 <B>aulow</B> = <B>minutes</B>
 <DL COMPACT><DT><DD>
-time no EMM occurs so that client is set to low, switch from status &quot;active&quot; to &quot;on&quot;, default:30
+time no EMM occurs so that client is set to low, default:30
 </DL>
 
 <P>
@@ -811,25 +775,9 @@ IP address of Cardservproxy for cache exchange, default:none
 
 <P>
 
-<B>wait_time</B> = <B>[caid][&amp;mask][@provid][$servid][:awtime][:]dwtime,n</B>
+<B>wait_time</B> = <B>milli-seconds</B>
 <DL COMPACT><DT><DD>
-wait time in milli-seconds for cache exchange (mode 2 and 3 only) and Cardservproxy before sending ECMs to reader or proxy, default:none
-<P>
-<BR>&nbsp;example:&nbsp;wait_time&nbsp;=&nbsp;0:50:250,<A HREF="mailto:0200@00009X">0200@00009X</A>:50:150,15:950,<A HREF="mailto:0500@000001">0500@000001</A>:150,1602&amp;ffdf:1200
-</DL>
-
-<P>
-
-<B>csp_ecm_filter</B> = <B>[caid][&amp;mask][@provid][$servid],n</B>
-<DL COMPACT><DT><DD>
-Cardservproxy incoming ECM filter setting, default:none
-</DL>
-
-<P>
-
-<B>csp_allow_request</B> = <B>0</B>|<B>1</B>
-<DL COMPACT><DT><DD>
-allow incoming ECM request from Cardservproxy, default:1
+wait time for cache exchange before sending ECM to Cardservproxy, default:none
 </DL>
 
 <A NAME="lbAJ">&nbsp;</A>
@@ -873,13 +821,13 @@ key for camd 3.3x client encryption, default:none
 </DL>
 
 <A NAME="lbAK">&nbsp;</A>
-<H3>The [cs357x] section</H3>
+<H3>The [camd35|cs357x] section</H3>
 
 <P>
 
 <B>port</B> = <B>0</B>|<B>port</B>
 <DL COMPACT><DT><DD>
-UDP port for camd 3.57x clients, 0 = disabled, default:0
+UDP port for camd 3.5x / 3.57x clients, 0 = disabled, default:0
 </DL>
 
 <P>
@@ -1147,13 +1095,6 @@ enable to add sevice to block list when service is not ok,default to 1.
 
 <P>
 
-<B>recv_timeout</B> = <B>milli-seconds</B>
-<DL COMPACT><DT><DD>
-set network timeout for receiving data, default:2000
-</DL>
-
-<P>
-
 <B>forward_origin_card</B> = <B>0</B>|<B>1</B>
 <DL COMPACT><DT><DD>
 1 = forward ECM request to reader holding this card, 
@@ -1241,6 +1182,8 @@ AU mode:
 <P>
 <BR>&nbsp;<B>0</B>&nbsp;=&nbsp;disable&nbsp;AU&nbsp;(default)
 <BR>&nbsp;<B>1</B>&nbsp;=&nbsp;enable&nbsp;AU
+<BR>&nbsp;<B>2</B>&nbsp;=&nbsp;enable&nbsp;AU,&nbsp;override&nbsp;AU&nbsp;settings&nbsp;of&nbsp;client,&nbsp;
+<BR>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;set&nbsp;answering&nbsp;reader&nbsp;as&nbsp;AU&nbsp;reader
 </DL>
 
 <P>
@@ -1302,13 +1245,6 @@ minimum time to write CW, default:0
 <B>reopenonzap</B> =  <B>0</B>|<B>1</B>
 <DL COMPACT><DT><DD>
 1 = reopen demux devices on each channel switching, default:0
-</DL>
-
-<P>
-
-<B>decodeforever</B> =  <B>0</B>|<B>1</B>
-<DL COMPACT><DT><DD>
-1 = trying to decode on all CAIDs infinitely, default:0
 </DL>
 
 <A NAME="lbAS">&nbsp;</A>
@@ -1573,7 +1509,7 @@ ECM and checksum in cache already.
 <DT><A HREF="#lbAH">The [lcd] section</A><DD>
 <DT><A HREF="#lbAI">The [csp] section</A><DD>
 <DT><A HREF="#lbAJ">The [camd33] section</A><DD>
-<DT><A HREF="#lbAK">The [cs357x] section</A><DD>
+<DT><A HREF="#lbAK">The [camd35|cs357x] section</A><DD>
 <DT><A HREF="#lbAL">The [cs378x] section</A><DD>
 <DT><A HREF="#lbAM">The [newcamd] section</A><DD>
 <DT><A HREF="#lbAN">The [radegast] section</A><DD>

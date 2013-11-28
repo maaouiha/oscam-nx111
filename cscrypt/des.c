@@ -1,5 +1,3 @@
-#include "../globals.h"
-#include "../oscam-string.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -129,7 +127,6 @@ static void doIp(unsigned char data[])
   unsigned char buf[8];
   unsigned char *p;
   unsigned char i = 8;
-  get_random_bytes(buf, sizeof(buf));
 
   for(i=0; i<8; i++)
   {
@@ -283,7 +280,7 @@ static void permut32(unsigned char data[])
 {
   unsigned char i, j;
   unsigned char bit;
-  unsigned char r[4] = {0}; // init to keep Valgrind happy
+  unsigned char r[4];
   unsigned char *p;
 
   for(i=0; i<32; i++)

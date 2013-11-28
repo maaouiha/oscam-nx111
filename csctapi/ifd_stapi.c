@@ -1,17 +1,8 @@
 #include "../globals.h"
 
-#ifdef CARDREADER_STAPI
+#if defined(WITH_CARDREADER) && defined(WITH_STAPI)
 #include "atr.h"
-
-/* These functions are implemented in liboscam_stapi.a */
-extern int32_t STReader_Open(char *device, uint32_t *stsmart_handle);
-extern int32_t STReader_GetStatus(uint32_t stsmart_handle, int32_t *in);
-extern int32_t STReader_Reset(uint32_t stsmart_handle, ATR *atr);
-extern int32_t STReader_Transmit(uint32_t stsmart_handle, unsigned char *sent, uint32_t size);
-extern int32_t STReader_Receive(uint32_t stsmart_handle, unsigned char *data, uint32_t size);
-extern int32_t STReader_Close(uint32_t stsmart_handle);
-extern int32_t STReader_SetProtocol(uint32_t stsmart_handle, unsigned char *params, unsigned *length, uint32_t len_request);
-extern int32_t STReader_SetClockrate(uint32_t stsmart_handle);
+#include "ifd_stapi.h"
 
 static int32_t stapi_init(struct s_reader *reader) {
 	return STReader_Open(reader->device, &reader->stsmart_handle);
@@ -25,15 +16,11 @@ static int32_t stapi_reset(struct s_reader *reader, ATR *atr) {
 	return STReader_Reset(reader->stsmart_handle, atr);
 }
 
-static int32_t stapi_transmit(struct s_reader *reader, unsigned char *sent, uint32_t size, uint32_t delay, uint32_t timeout) { // delay + timeout not in use (yet)!
-	(void) delay; // delay not in use (yet)!
-	(void) timeout; // timeout not in use (yet)!
+static int32_t stapi_transmit(struct s_reader *reader, unsigned char *sent, uint32_t size) {
 	return STReader_Transmit(reader->stsmart_handle, sent, size);
 }
 
-static int32_t stapi_receive(struct s_reader *reader, unsigned char *data, uint32_t size, uint32_t delay, uint32_t timeout) { // delay + timeout not in use (yet)!
-	(void) delay; // delay not in use (yet)!
-	(void) timeout; // timeout not in use (yet)!
+static int32_t stapi_receive(struct s_reader *reader, unsigned char *data, uint32_t size) {
 	return STReader_Receive(reader->stsmart_handle, data, size);
 }
 

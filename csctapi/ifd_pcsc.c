@@ -1,41 +1,15 @@
 #include "../globals.h"
 
-#ifdef CARDREADER_PCSC
+#if defined(WITH_CARDREADER) && defined(WITH_PCSC)
 
-#include "atr.h"
-#include "../oscam-string.h"
+#include "ifd_pcsc.h"
 
-#ifdef WITH_PCSC
-  #if defined(__CYGWIN__)
-    #define __reserved
-    #define __nullnullterminated
-    #include <specstrings.h>
-    #include <WinSCard.h>
-  #else
-    #include <PCSC/pcsclite.h>
-    #include <PCSC/winscard.h>
-    #if defined(__APPLE__)
-       #include <PCSC/wintypes.h>
-    #else
-       #include <PCSC/reader.h>
-    #endif
-  #endif
-#endif
-
-#ifndef ERR_INVALID
-#define ERR_INVALID -1
-#endif
-
-#define OK 0
-#define ERROR 1
-
-static int32_t pcsc_init(struct s_reader *pcsc_reader)
+int32_t pcsc_reader_init(struct s_reader *pcsc_reader, char *device)
 {
     ULONG rv;
     DWORD dwReaders;
     LPSTR mszReaders = NULL;
     char *ptr, **readers = NULL;
-    char *device = pcsc_reader->device;
     int32_t nbReaders;
     int32_t reader_nb;
 
@@ -52,15 +26,14 @@ static int32_t pcsc_init(struct s_reader *pcsc_reader)
         rv = SCardListReaders(pcsc_reader->hContext, NULL, NULL, &dwReaders);
         if( rv != SCARD_S_SUCCESS ) {
             rdr_debug_mask(pcsc_reader, D_DEVICE, "PCSC failed listing readers [1] : (%lx)", (unsigned long)rv);
-            return ERROR;
+            return  2;
         }
-        if (!cs_malloc(&mszReaders, dwReaders))
-            return ERROR;
+        if(!cs_malloc(&mszReaders,sizeof(char)*dwReaders, -1)) return 2;
         rv = SCardListReaders(pcsc_reader->hContext, NULL, mszReaders, &dwReaders);
         if( rv != SCARD_S_SUCCESS ) {
             rdr_debug_mask(pcsc_reader, D_DEVICE, "PCSC failed listing readers [2]: (%lx)", (unsigned long)rv);
             free(mszReaders);
-            return ERROR;
+            return  2;
         }
         /* Extract readers from the null separated string and get the total
          * number of readers
@@ -75,11 +48,11 @@ static int32_t pcsc_init(struct s_reader *pcsc_reader)
         if (nbReaders == 0) {
             rdr_log(pcsc_reader, "PCSC : no pcsc_reader found");
             free(mszReaders);
-            return ERROR;
+            return  2;
         }
 
-        if (!cs_malloc(&readers, nbReaders * sizeof(char *)))
-            return ERROR;
+        if (!cs_malloc(&readers,nbReaders * sizeof(char *), -1))
+            return 2;
 
         /* fill the readers table */
         nbReaders = 0;
@@ -96,7 +69,7 @@ static int32_t pcsc_init(struct s_reader *pcsc_reader)
             rdr_log(pcsc_reader, "Wrong pcsc_reader index: %d", reader_nb);
             free(mszReaders);
             free(readers);
-            return ERROR;
+            return  2;
         }
 
         snprintf(pcsc_reader->pcsc_name,sizeof(pcsc_reader->pcsc_name),"%s",readers[reader_nb]);
@@ -105,22 +78,22 @@ static int32_t pcsc_init(struct s_reader *pcsc_reader)
     }
     else {
         rdr_log(pcsc_reader, "PCSC failed establish context (%lx)", (unsigned long)rv);
-        return ERROR;
+        return 2;
     }
-    return OK;
+    return 0;
 }
 
-static int32_t pcsc_do_api(struct s_reader *pcsc_reader, const uchar *buf, uchar *cta_res, uint16_t *cta_lr, int32_t l)
+int32_t pcsc_reader_do_api(struct s_reader *pcsc_reader, const uchar *buf, uchar *cta_res, uint16_t *cta_lr, int32_t l)
 {
      LONG rv;
      DWORD dwSendLength, dwRecvLength;
 
     if(!l) {
         rdr_log(pcsc_reader, "ERROR: Data length to be send to the pcsc_reader is %d", l);
-        return ERROR;
+        return ERR_INVALID;
     }
 
-    char tmp[520];
+		char tmp[520];
     dwRecvLength = CTA_RES_LEN;
     *cta_lr = 0;
 
@@ -148,7 +121,7 @@ static int32_t pcsc_do_api(struct s_reader *pcsc_reader, const uchar *buf, uchar
     }
     else {
         rdr_debug_mask(pcsc_reader, D_DEVICE, "PCSC invalid protocol (T=%lu)", (unsigned long)pcsc_reader->dwActiveProtocol);
-        return ERROR;
+        return ERR_INVALID;
     }
 
      rdr_debug_mask(pcsc_reader, D_DEVICE, "received %d bytes from PCSC with rv=%lx : %s", *cta_lr, (unsigned long)rv,cs_hexdump(1,cta_res,*cta_lr, tmp, sizeof(tmp)));
@@ -159,16 +132,16 @@ static int32_t pcsc_do_api(struct s_reader *pcsc_reader, const uchar *buf, uchar
          return OK;
      }
      else {
-         return ERROR;
+         return ERR_INVALID;
      }
 
 }
 
-static int32_t pcsc_activate_card(struct s_reader *pcsc_reader, uchar *atr, uint16_t *atr_size)
+int32_t pcsc_activate_card(struct s_reader *pcsc_reader, uchar *atr, uint16_t *atr_size)
 {
     LONG rv;
     DWORD dwState, dwAtrLen, dwReaderLen;
-    unsigned char pbAtr[ATR_MAX_SIZE];
+    BYTE pbAtr[64];
     char tmp[sizeof(pbAtr)*3+1];
 
     rdr_debug_mask(pcsc_reader, D_DEVICE, "PCSC initializing card in (%s)", pcsc_reader->pcsc_name);
@@ -180,7 +153,7 @@ static int32_t pcsc_activate_card(struct s_reader *pcsc_reader, uchar *atr, uint
 
     if ( rv != SCARD_S_SUCCESS )  {
         rdr_debug_mask(pcsc_reader, D_DEVICE, "ERROR: PCSC failed to reset card (%lx)", (unsigned long)rv);
-        return ERROR;
+        return(0);
     }
 
     rdr_debug_mask(pcsc_reader, D_DEVICE, "PCSC resetting done on card in (%s)", pcsc_reader->pcsc_name);
@@ -196,33 +169,21 @@ static int32_t pcsc_activate_card(struct s_reader *pcsc_reader, uchar *atr, uint
         rdr_log(pcsc_reader, "ATR: %s", cs_hexdump(1, (uchar *)pbAtr, dwAtrLen, tmp, sizeof(tmp)));
     	memcpy(pcsc_reader->card_atr, pbAtr, dwAtrLen);
     	pcsc_reader->card_atr_length = dwAtrLen;
-        return OK;
+        return(1);
     }
     else {
         rdr_debug_mask(pcsc_reader, D_DEVICE, "ERROR: PCSC failed to get ATR for card (%lx)", (unsigned long)rv);
     }
 
-    return ERROR;
+    return(0);
 }
 
-static int32_t pcsc_activate(struct s_reader *reader, struct s_ATR *atr)
-{
-    unsigned char atrarr[ATR_MAX_SIZE];
-    uint16_t atr_size = 0;
-    if (pcsc_activate_card(reader, atrarr, &atr_size) == OK) {
-        if (ATR_InitFromArray(atr, atrarr, atr_size) != ERROR) // ATR is OK or softfail malformed 
-            return OK;
-        else
-            return ERROR;
-    } else
-        return ERROR;
-}
 
-static int32_t pcsc_check_card_inserted(struct s_reader *pcsc_reader)
+int32_t pcsc_check_card_inserted(struct s_reader *pcsc_reader)
 {
     DWORD dwState, dwAtrLen, dwReaderLen;
-    unsigned char pbAtr[64];
-    SCARDHANDLE rv;
+    BYTE pbAtr[64];
+    LONG rv;
 
     dwAtrLen = sizeof(pbAtr);
     rv=0;
@@ -233,7 +194,7 @@ static int32_t pcsc_check_card_inserted(struct s_reader *pcsc_reader)
     if (!pcsc_reader->pcsc_has_card && !(SCARDHANDLE)(pcsc_reader->hCard)) {
         // try connecting to the card
         rv = SCardConnect(pcsc_reader->hContext, pcsc_reader->pcsc_name, SCARD_SHARE_SHARED, SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, &pcsc_reader->hCard, &pcsc_reader->dwActiveProtocol);
-        if (rv == (LONG)SCARD_E_NO_SMARTCARD) {
+        if (rv==SCARD_E_NO_SMARTCARD) {
             // no card in pcsc_reader
             pcsc_reader->pcsc_has_card=0;
             if((SCARDHANDLE)(pcsc_reader->hCard)) {
@@ -241,24 +202,23 @@ static int32_t pcsc_check_card_inserted(struct s_reader *pcsc_reader)
                 pcsc_reader->hCard=0;
             }
             // rdr_debug_mask(pcsc_reader, D_DEVICE, "PCSC card in %s removed / absent [dwstate=%lx rv=(%lx)]", pcsc_reader->pcsc_name, dwState, (unsigned long)rv );
-            return OK;
+            return 0;
         }
-        else if (rv == (LONG)SCARD_W_UNRESPONSIVE_CARD) {
+        else if( rv == SCARD_W_UNRESPONSIVE_CARD ) {
             // there is a problem with the card in the pcsc_reader
             pcsc_reader->pcsc_has_card=0;
             pcsc_reader->hCard=0;
             rdr_log(pcsc_reader, "PCSC card in %s is unresponsive. Eject and re-insert please.", pcsc_reader->pcsc_name);
-            return ERROR;
+            return 0;
         }
         else if( rv == SCARD_S_SUCCESS ) {
             // we have a card
             pcsc_reader->pcsc_has_card=1;
-            rdr_log(pcsc_reader, "PCSC was opened with handle: %ld", (long)pcsc_reader->hCard);
         }
         else {
             // if we get here we have a bigger problem -> display status and debug
             // rdr_debug_mask(pcsc_reader, D_DEVICE, "PCSC pcsc_reader %s status [dwstate=%lx rv=(%lx)]", pcsc_reader->pcsc_name, dwState, (unsigned long)rv );
-            return ERROR;
+            return 0;
         }
 
     }
@@ -267,7 +227,7 @@ static int32_t pcsc_check_card_inserted(struct s_reader *pcsc_reader)
     rv = SCardStatus((SCARDHANDLE)(pcsc_reader->hCard), NULL, &dwReaderLen, &dwState, &pcsc_reader->dwActiveProtocol, pbAtr, &dwAtrLen);
 
     if (rv == SCARD_S_SUCCESS && (dwState & (SCARD_PRESENT | SCARD_NEGOTIABLE | SCARD_POWERED ) )) {
-        return OK;
+        return CARD_INSERTED;
     }
     else {
         SCardDisconnect((SCARDHANDLE)(pcsc_reader->hCard),SCARD_RESET_CARD);
@@ -275,37 +235,15 @@ static int32_t pcsc_check_card_inserted(struct s_reader *pcsc_reader)
         pcsc_reader->pcsc_has_card=0;
     }
 
-    return ERROR;
+    return 0;
 }
 
-static int32_t pcsc_get_status(struct s_reader *reader, int32_t *in) {
-    int32_t ret = pcsc_check_card_inserted(reader);
-    *in = reader->pcsc_has_card;
-    return ret;
-}
-
-static int32_t pcsc_close(struct s_reader *pcsc_reader)
+void pcsc_close(struct s_reader *pcsc_reader)
 {
     rdr_debug_mask(pcsc_reader, D_IFD, "PCSC : Closing device %s", pcsc_reader->device);
     SCardDisconnect((SCARDHANDLE)(pcsc_reader->hCard),SCARD_LEAVE_CARD);
     SCardReleaseContext(pcsc_reader->hContext);
     pcsc_reader->hCard=0;
     pcsc_reader->pcsc_has_card=0;
-    return OK;
 }
-
-void cardreader_pcsc(struct s_cardreader *crdr)
-{
-    crdr->desc         = "pcsc";
-    crdr->typ          = R_PCSC;
-    crdr->skip_extra_atr_parsing  = 1;
-    crdr->skip_t1_command_retries = 1;
-    crdr->skip_setting_ifsc       = 1;
-    crdr->reader_init  = pcsc_init;
-    crdr->get_status   = pcsc_get_status;
-    crdr->activate     = pcsc_activate;
-    crdr->card_write   = pcsc_do_api;
-    crdr->close        = pcsc_close;
-}
-
 #endif

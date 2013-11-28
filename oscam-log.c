@@ -1,21 +1,14 @@
 #include "globals.h"
 #include <syslog.h>
 #include <stdlib.h>
-#include "module-monitor.h"
-#include "oscam-client.h"
-#include "oscam-garbage.h"
-#include "oscam-lock.h"
-#include "oscam-log.h"
-#include "oscam-net.h"
-#include "oscam-string.h"
-#include "oscam-time.h"
-
-extern struct s_module modules[CS_MAX_MOD];
 
 char *LOG_LIST = "log_list";
 
 static FILE *fp=(FILE *)0;
 static FILE *fps=(FILE *)0;
+#ifdef CS_ANTICASC
+static FILE *fpa=(FILE *)0;
+#endif
 static int8_t logStarted = 0;
 LLIST *log_list;
 char *vbuf;
@@ -94,15 +87,8 @@ static void cs_write_log_int(char *txt)
 	if(exit_oscam == 1) {
 		cs_write_log(txt, 1);
 	} else {
-		char *newtxt = cs_strdup(txt);
-		if (!newtxt)
-			return;
-		struct s_log *log;
-		if (!cs_malloc(&log, sizeof(struct s_log))) {
-			free(newtxt);
-			return;
-		}
-		log->txt = newtxt;
+		struct s_log * log = cs_malloc(&log, sizeof(struct s_log), 0);
+		log->txt = strnew(txt);
 		log->header_len = 0;
 		log->direct_log = 1;
 		ll_append(log_list, log);
@@ -141,6 +127,25 @@ int32_t cs_open_logfiles(void)
 	return(fp <= (FILE *)0);
 }
 
+#ifdef CS_ANTICASC
+int32_t ac_init_log(void){
+	FILE *tmp = fpa;
+	fpa=(FILE *)0;
+	if(tmp)
+		fclose(tmp);
+
+	if(cfg.ac_logfile[0]) {
+		if( (fpa=fopen(cfg.ac_logfile, "a+"))<=(FILE *)0 ) {
+			fpa=(FILE *)0;
+			fprintf(stderr, "can't open anti-cascading logfile: %s\n", cfg.ac_logfile);
+		} else
+			cs_log("anti-cascading log initialized");
+	}
+
+	return(fpa<=(FILE *)0);
+}
+#endif
+
 #if defined(WEBIF) || defined(MODULE_MONITOR)
 /*
  This function allows to reinit the in-memory loghistory with a new size.
@@ -149,7 +154,7 @@ void cs_reinit_loghist(uint32_t size)
 {
 	char *tmp = NULL, *tmp2;
 	if(size != cfg.loghistorysize){
-		if (size == 0 || cs_malloc(&tmp, size)) {
+		if(size == 0 || cs_malloc(&tmp, size, -1)){
 			cs_writelock(&loghistory_lock);
 			tmp2 = loghist;
 			// On shrinking, the log is not copied and the order is reversed
@@ -202,11 +207,13 @@ static void write_to_log(char *txt, struct s_log *log, int8_t do_flush)
 	char sbuf[16];
 
 #ifdef CS_ANTICASC
-	extern FILE *ac_log;
-	if (!strncmp(txt + log->header_len, "acasc:", 6) && ac_log) {
+	if (!strncmp(txt + log->header_len, "acasc:", 6)) {
 		strcat(txt, "\n");
-		fputs(txt + 8, ac_log);
-		fflush(ac_log);
+		switch_log(cfg.ac_logfile, &fpa, ac_init_log);
+		if (fpa) {
+			fputs(txt + 8, fpa);
+			if (do_flush) fflush(fpa);
+		}
 	} else
 #endif
 	{
@@ -260,7 +267,9 @@ static void write_to_log(char *txt, struct s_log *log, int8_t do_flush)
 			snprintf(sbuf, sizeof(sbuf), "%03d", cl->logcounter);
 			cl->logcounter = (cl->logcounter+1) % 1000;
 			memcpy(txt + 4, sbuf, 3);
+#ifdef MODULE_MONITOR
 			monitor_send_idx(cl, txt);
+#endif
 		}
 	}
 }
@@ -270,15 +279,9 @@ static void write_to_log_int(char *txt, int8_t header_len)
 #if !defined(WEBIF) && !defined(MODULE_MONITOR)
 	if (cfg.disablelog) return;
 #endif
-	char *newtxt = cs_strdup(txt);
-	if (!newtxt)
-		return;
-	struct s_log *log;
-	if (!cs_malloc(&log, sizeof(struct s_log))) {
-		free(newtxt);
-		return;
-	}
-	log->txt = newtxt;
+
+	struct s_log *log = cs_malloc(&log, sizeof(struct s_log), 0);
+	log->txt = strnew(txt);
 	log->header_len = header_len;
 	log->direct_log = 0;
 	struct s_client *cl = cur_client();
@@ -323,64 +326,69 @@ static unsigned int last_log_duplicates = 0;
 
 void cs_log_int(uint16_t mask, int8_t lock __attribute__((unused)), const uchar *buf, int32_t n, const char *fmt, ...)
 {
-	if ((mask & cs_dblevel) || !mask ) {
-		va_list params;
+	va_list params;
 
-		static char log_txt[LOG_BUF_SIZE], dupl[LOG_BUF_SIZE/4];
-		int32_t dupl_header_len, repeated_line, i, len = 0;
-		pthread_mutex_lock(&log_mutex);
-		if (fmt)
-		{
-			va_start(params, fmt);
-			len = get_log_header(1, log_txt);
-			vsnprintf(log_txt + len, sizeof(log_txt) - len, fmt, params);
-			va_end(params);
-			repeated_line = strcmp(last_log_txt, log_txt + len) == 0;
-			if (last_log_duplicates > 0) {
-				if (!last_log_ts) // Must be initialized once
-					last_log_ts = log_ts;
-				// Report duplicated lines when the new log line is different
-				// than the old or 60 seconds have passed.
-				if (!repeated_line || log_ts - last_log_ts >= 60) {
-					dupl_header_len = get_log_header(2, dupl);
-					snprintf(dupl + dupl_header_len - 1, sizeof(dupl) - dupl_header_len, "--- Skipped %u duplicated log lines ---", last_log_duplicates);
-					write_to_log_int(dupl, 0);
-					last_log_duplicates = 0;
-					last_log_ts = log_ts;
-				}
-			}
-			if (!repeated_line) {
-				memcpy(last_log_txt, log_txt + len, LOG_BUF_SIZE);
-				write_to_log_int(log_txt, len);
-			} else {
-				last_log_duplicates++;
+	char log_txt[LOG_BUF_SIZE];
+	int32_t i, len = 0;
+	pthread_mutex_lock(&log_mutex);
+	if (((mask & cs_dblevel) || !mask) && (fmt))
+	{
+		va_start(params, fmt);
+		len = get_log_header(1, log_txt);
+		vsnprintf(log_txt + len, sizeof(log_txt) - len, fmt, params);
+		va_end(params);
+		int repeated_line = strcmp(last_log_txt, log_txt + len) == 0;
+		if (last_log_duplicates > 0) {
+			if (!last_log_ts) // Must be initialized once
+				last_log_ts = log_ts;
+			// Report duplicated lines when the new log line is different
+			// than the old or 60 seconds have passed.
+			if (!repeated_line || log_ts - last_log_ts >= 60) {
+				char dupl[len + 32];
+				len = get_log_header(2, dupl);
+				snprintf(dupl + len - 1, len + 32, "--- Skipped %d duplicated log lines ---", last_log_duplicates);
+				write_to_log_int(dupl, 0);
+				last_log_duplicates = 0;
+				last_log_ts = log_ts;
 			}
 		}
-		if (buf)
-		{
-			for (i=0; i<n; i+=16)
-			{
-				len = get_log_header(0, log_txt);
-				cs_hexdump(1, buf+i, (n-i>16) ? 16 : n-i, log_txt + len, sizeof(log_txt) - len);
-				write_to_log_int(log_txt, len);
-			}
+		if (!repeated_line) {
+			memcpy(last_log_txt, log_txt + len, LOG_BUF_SIZE);
+			write_to_log_int(log_txt, len);
+		} else {
+			last_log_duplicates++;
 		}
-		pthread_mutex_unlock(&log_mutex);
 	}
+	if (buf && ((mask & cs_dblevel) || !mask))
+	{
+		for (i=0; i<n; i+=16)
+		{
+			len = get_log_header(0, log_txt);
+			cs_hexdump(1, buf+i, (n-i>16) ? 16 : n-i, log_txt + len, sizeof(log_txt) - len);
+			write_to_log_int(log_txt, len);
+		}
+	}
+	pthread_mutex_unlock(&log_mutex);
 }
 
 void cs_close_log(void)
 {
 	//Wait for log close:
 	int32_t i = 0;
-	while (ll_count(log_list) > 0 && i < 1000) {
-		cs_sleepms(1);
+	while (ll_count(log_list) > 0 && i < 200) {
+		cs_sleepms(5);
 		++i;
 	}
 	if(fp){
 		fclose(fp);
 		fp=(FILE *)0;
 	}
+}
+
+void log_emm_request(struct s_reader *rdr){
+	cs_log("%s emm-request sent (reader=%s, caid=%04X, auprovid=%06X)",
+			username(cur_client()), rdr->label, rdr->caid,
+			rdr->auprovid ? rdr->auprovid : b2i(4, rdr->prid[0]));
 }
 
 /*
@@ -431,7 +439,7 @@ void logCWtoFile(ECM_REQUEST *er, uchar *cw){
 	}
 	if (writeheader) {
 		/* no global macro for cardserver name :( */
-		fprintf(pfCWL, "# OSCam cardserver v%s - http://www.streamboard.tv/oscam/\n", CS_VERSION);
+		fprintf(pfCWL, "# OSCam cardserver v%s - http://streamboard.de.vu/oscam/\n", CS_VERSION);
 		fprintf(pfCWL, "# control word log file for use with tsdec offline decrypter\n");
 		strftime(buf, sizeof(buf),"DATE %Y-%m-%d, TIME %H:%M:%S, TZ %Z\n", &timeinfo);
 		fprintf(pfCWL, "# %s", buf);
@@ -506,7 +514,7 @@ void cs_statistics(struct s_client * client)
 			cwps=0;
 
 		char channame[32];
-		if (cfg.appendchaninfo)
+		if(cfg.mon_appendchaninfo)
 			get_servicename(client, client->last_srvid,client->last_caid, channame);
 		else
 			channame[0] = '\0';
@@ -548,7 +556,7 @@ void cs_statistics(struct s_client * client)
 				client->login,
 				client->last,
 				fullhours, mins, secs,
-				modules[client->ctyp].desc,
+				ph[client->ctyp].desc,
 				client->last_caid,
 				client->last_srvid,
 				channame);

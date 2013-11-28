@@ -1,6 +1,5 @@
 #include "globals.h"
 #ifdef READER_IRDETO
-#include "oscam-time.h"
 #include "reader-common.h"
 
 static const uchar CryptTable[256] =
@@ -159,7 +158,6 @@ static time_t chid_date(struct s_reader * reader, uint32_t date, char *buf, int3
                                {0x0666, 0x0006, "SVK", 946598400L},    // 30.12.1999, 16:00    //cslink irdeto
                                {0x0666, 0x0006, "CZE", 946598400L},    // 30.12.1999, 16:00    //cslink irdeto
                                {0x0648, 0x0608, "AUT", 946598400L},    // 31.12.1999, 00:00    //orf ice irdeto
-                               {0x0648, 0x0005, "AUT", 946598400L},    // 31.12.1999, 00:00    //orf ice irdeto
                                {0x0604, 0x0605, "GRC", 1011052800L},   // 15.01.2002, 00:00    //nova irdeto
                                {0x0604, 0x0606, "GRC", 1011052800L},   // 15.01.2002, 00:00    //nova irdeto
                                {0x0604, 0x0607, "GRC", 1011052800L},   // 15.01.2002, 00:00    //nova irdeto
@@ -172,7 +170,7 @@ static time_t chid_date(struct s_reader * reader, uint32_t date, char *buf, int3
 							   {0x0602, 0x0505, "NLD", 946598400L},    // 31.12.1999, 00:00    //Ziggo irdeto caid: 0602, acs: 5.05
 							   {0x0606, 0x0605, "NLD", 946598400L},    // 31.12.1999, 00:00    //Caiway irdeto card caid: 0606, acs: 6.05
 							   {0x0606, 0x0606, "NLD", 946598400L},    // 31.12.1999, 00:00    //Caiway irdeto card caid: 0606, acs: 6.06
-							   {0x0652, 0x0608, "MCR", 1206662400L},   // 28.03.2008, 00:00    //Raduga caid:0652, acs: 6.08
+
                                // {0x1702, 0x0384, "AUT", XXXXXXXXXL},     // -> we need the base date for this
                                // {0x1702, 0x0384, "GER", 888883200L},     // 02.03.1998, 16:00 -> this fixes some card but break others (S02).
                                {0x0, 0x0, "", 0L}
@@ -563,7 +561,7 @@ static int32_t irdeto_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr) {
 			// global emm, 0 bytes addressed
 			ep->type = GLOBAL;
 			rdr_debug_mask(rdr, D_EMM, "GLOBAL base = %02x", base);
-			return 1;
+			return TRUE;
 
 		case 2:
 			// shared emm, 2 bytes addressed
@@ -581,15 +579,15 @@ static int32_t irdeto_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr) {
 			}
 			else {
 				if (!memcmp(ep->emm + 4, rdr->hexserial, l))
-					return 1;
+					return TRUE;
 
 				// provider addressed
 				for(i = 0; i < rdr->nprov; i++)
 					if (base == rdr->prid[i][0] && !memcmp(ep->emm + 4, &rdr->prid[i][1], l))
-						return 1;
+						return TRUE;
 			}
 			rdr_debug_mask(rdr, D_EMM, "neither hex nor provider addressed or unknown provider id");
-			return 0;
+			return FALSE;
 
 		case 3:
 			// unique emm, 3 bytes addressed
@@ -606,20 +604,20 @@ static int32_t irdeto_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr) {
 				return (base == rdr->hexserial[3] && !memcmp(ep->emm + 4, rdr->hexserial, l));
 			else {
 				if (!memcmp(ep->emm + 4, rdr->hexserial, l))
-					return 1;
+					return TRUE;
 
 				// unique provider addressed
 				for(i = 0; i < rdr->nprov; i++)
 					if (base == rdr->prid[i][0] && !memcmp(ep->emm + 4, &rdr->prid[i][1], l))
-						return 1;
+						return TRUE;
 			}
 			rdr_debug_mask(rdr, D_EMM, "neither hex nor provider addressed or unknown provider id");
-			return 0;
+			return FALSE;
 
 		default:
 			ep->type = UNKNOWN;
 			rdr_debug_mask(rdr, D_EMM, "UNKNOWN");
-			return 1;
+			return TRUE;
 	}
 
 }
@@ -769,6 +767,7 @@ static int32_t irdeto_do_emm(struct s_reader * reader, EMM_PACKET *ep)
 						memcpy(&cta_cmd[10],&ep->emm[9],dataLen-6);
 					}
 				}
+				int32_t i=0;
 				for(i=5;i<dataLen+4;i++)
 					crc^=cta_cmd[i];
 				cta_cmd[dataLen-1+5]=crc;

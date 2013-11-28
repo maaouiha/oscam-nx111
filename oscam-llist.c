@@ -2,15 +2,10 @@
 /* singularly linked-list */
 
 #include "globals.h"
-#include "oscam-garbage.h"
-#include "oscam-lock.h"
-#include "oscam-string.h"
-
-extern char *LOG_LIST;
 
 /*
   Locking rules:
-
+  
   mutex lock is needed when...
   1. l->initial + l->last is modified/accessed
   2. LL_NODE nxt modified/accessed
@@ -27,11 +22,8 @@ static int8_t chk_debuglog(LLIST *l)
 
 static void _destroy(LLIST *l)
 {
-	if (!l) return;
+	if (!l) return;  	
 	if (!l->flag++) {
-	        cs_writelock(&l->lock); //just getting sure noone is using it
-	        cs_writeunlock(&l->lock);
-	        
 		cs_lock_destroy(&l->lock);
 		add_garbage(l);
 	}
@@ -39,16 +31,14 @@ static void _destroy(LLIST *l)
 
 LLIST *ll_create(const char *name)
 {
-    LLIST *l;
-    if (!cs_malloc(&l, sizeof(LLIST)))
-        return NULL;
+    LLIST *l = cs_malloc(&l, sizeof(LLIST), 0);
     cs_lock_create(&l->lock, 5, name);
     return l;
 }
 
 void ll_destroy(LLIST *l)
 {
-    if (!l || l->flag) return;
+    if (!l) return;
     ll_clear(l);
 
     _destroy(l);
@@ -90,7 +80,7 @@ static void *ll_iter_next_nolock(LL_ITER *it)
 		}
 		it->ll_version = it->l->version;
 		//cs_readunlock(&it->l->lock);
-
+		
 		if (it->cur)
 			return it->cur->obj;
 
@@ -100,7 +90,7 @@ static void *ll_iter_next_nolock(LL_ITER *it)
 			it->cur = it->cur->nxt;
 		} else if (it->l->initial && !it->prv)
 			it->cur = it->l->initial;
-
+      
 		if (it->cur)
 			return it->cur->obj;
 	}
@@ -109,16 +99,16 @@ static void *ll_iter_next_nolock(LL_ITER *it)
 
 static void ll_clear_int(LLIST *l, int32_t clear_data)
 {
-    if (!l||l->flag) return;
+    if (!l) return;
 
     cs_writelock(&l->lock);
-
+    
     LL_NODE *n=l->initial, *nxt;
     while (n) {
     	nxt = n->nxt;
     		if (clear_data)
     			add_garbage(n->obj);
-    		add_garbage(n);
+    		add_garbage(n);		
 		n = nxt;
     }
     l->version++;
@@ -142,18 +132,17 @@ void ll_clear_data(LLIST *l)
 /* Appends to the list. Do not call this from outside without having a lock! */
 static LL_NODE* ll_append_nolock(LLIST *l, void *obj)
 {
-    if (l && obj && !l->flag) {
+    if (l && obj) {
         LL_NODE *new;
-        if (!cs_malloc(&new, sizeof(LL_NODE)))
-            return NULL;
+        if(!cs_malloc(&new,sizeof(LL_NODE), -1)) return NULL;
         new->obj = obj;
-
+        
         if (l->last)
             l->last->nxt = new;
         else
             l->initial = new;
-		l->last = new;
-
+		l->last = new;    
+		
         l->count++;
         return new;
     }
@@ -163,9 +152,9 @@ static LL_NODE* ll_append_nolock(LLIST *l, void *obj)
 
 LL_NODE* ll_append(LLIST *l, void *obj)
 {
-    if (l && obj && !l->flag) {
+    if (l && obj) {
         cs_writelock(&l->lock);
-
+        
         LL_NODE *n = ll_append_nolock(l, obj);
         cs_writeunlock(&l->lock);
         return n;
@@ -175,14 +164,13 @@ LL_NODE* ll_append(LLIST *l, void *obj)
 
 LL_NODE *ll_prepend(LLIST *l, void *obj)
 {
-    if (l && obj && !l->flag) {
+    if (l && obj) {
         LL_NODE *new;
-        if (!cs_malloc(&new, sizeof(LL_NODE)))
-            return NULL;
-        new->obj = obj;
-
+        if(!cs_malloc(&new,sizeof(LL_NODE), -1)) return NULL;
+				new->obj = obj;
+				
         cs_writelock(&l->lock);
-
+        
         new->nxt = l->initial;
 
         l->initial = new;
@@ -210,7 +198,7 @@ LL_ITER ll_iter_create(LLIST *l)
 
 void *ll_iter_next(LL_ITER *it)
 {
-	if (it && it->l && !it->l->flag) {
+	if (it && it->l) {
 		cs_readlock(&it->l->lock);
 		void *res = ll_iter_next_nolock(it);
 		cs_readunlock(&it->l->lock);
@@ -267,7 +255,7 @@ void *ll_iter_remove_nolock(LL_ITER *it)
 
 void *ll_iter_next_remove(LL_ITER *it)
 {
-	if (it && it->l && !it->l->flag) {
+	if (it && it->l) {
 		cs_writelock(&it->l->lock);
 		void *res = ll_iter_next_nolock(it);
 		ll_iter_remove_nolock(it);
@@ -279,14 +267,14 @@ void *ll_iter_next_remove(LL_ITER *it)
 
 void *ll_iter_move(LL_ITER *it, int32_t offset)
 {
-	if (it && it->l && !it->l->flag) {
+	if (it && it->l) {
 		int32_t i;
 		void *res = NULL;
 		for (i=0; i<offset; i++) {
 			res = ll_iter_next_nolock(it);
 			if (!res) break;
 		}
-
+		
 		return res;
 	}
 	return NULL;
@@ -294,9 +282,9 @@ void *ll_iter_move(LL_ITER *it, int32_t offset)
 
 void *ll_iter_peek(const LL_ITER *it, int32_t offset)
 {
-	if (it && it->l && !it->l->flag) {
+	if (it && it->l) {
 		cs_readlock(&((LL_ITER*)it)->l->lock);
-
+		
 		LL_NODE *n = it->cur;
 		int32_t i;
 
@@ -325,17 +313,14 @@ void ll_iter_reset(LL_ITER *it)
 
 void ll_iter_insert(LL_ITER *it, void *obj)
 {
-    if (it && obj && !it->l->flag) {
-	cs_writelock(&it->l->lock);
-
+    if (it && obj) {
+	   	cs_writelock(&it->l->lock);
+	   	
         if (!it->cur || !it->cur->nxt)
             ll_append_nolock(it->l, obj);
         else {
             LL_NODE *n;
-            if (!cs_malloc(&n, sizeof(LL_NODE))) {
-                cs_writeunlock(&it->l->lock);
-                return;
-            }
+            if(!cs_malloc(&n,sizeof(LL_NODE), -1)) { cs_writeunlock(&it->l->lock); return; }
 
             n->obj = obj;
             n->nxt = it->cur->nxt;
@@ -352,7 +337,7 @@ void ll_iter_insert(LL_ITER *it, void *obj)
 void *ll_iter_remove(LL_ITER *it)
 {
 	void *obj = NULL;
-	if (it && it->l && !it->l->flag) {
+	if (it) {		
 		LL_NODE *del = it->cur;
 		if (del) {
 			cs_writelock(&it->l->lock);
@@ -365,10 +350,10 @@ void *ll_iter_remove(LL_ITER *it)
 }
 
 /* Moves the element which is currently pointed to by the iterator to the head of the list.*/
-int32_t ll_iter_move_first(LL_ITER *it)
+int32_t ll_iter_move_first(LL_ITER *it) 
 {
 	int32_t moved = 0;
-	if (it && it->l && !it->l->flag) {
+	if (it) {	
 		LL_NODE *move = it->cur;
 		if (move) {
 		        if (move == it->l->initial) //Can't move self to first
@@ -388,22 +373,22 @@ int32_t ll_iter_move_first(LL_ITER *it)
 					return moved;
 				}
 			}
-
+			
 			if (prv)
 				prv->nxt = move->nxt;
 			else
 				it->l->initial = move->nxt;
-
+			
 			if (prv && it->l->last == move)
 				it->l->last = prv;
 			move->nxt = it->l->initial;
 			it->l->initial = move;
-
+			
 			it->ll_version = ++it->l->version;
 			it->prv = NULL;
 			cs_writeunlock(&it->l->lock);
 			moved = 1;
-		}
+		}		
 	}
 	return moved;
 }
@@ -414,21 +399,23 @@ void ll_iter_remove_data(LL_ITER *it)
     add_garbage(obj);
 }
 
+int32_t ll_count(const LLIST *l)
+{
+    if (!l)
+      return 0;
+      
+    return l->count;
+}
+
 void *ll_has_elements(const LLIST *l) {
-  if (!l || !l->initial || l->flag)
+  if (!l || !l->initial)
     return NULL;
   return l->initial->obj;
 }
 
-void *ll_last_element(const LLIST *l) {
-  if (!l || !l->last || l->flag)
-    return NULL;
-  return l->last->obj;
-}
-
 int32_t ll_contains(const LLIST *l, const void *obj)
 {
-    if (!l || !obj || l->flag)
+    if (!l || !obj)
       return 0;
     LL_ITER it = ll_iter_create((LLIST *) l);
     const void *data;
@@ -440,20 +427,20 @@ int32_t ll_contains(const LLIST *l, const void *obj)
 }
 
 const void *ll_contains_data(const LLIST *l, const void *obj, uint32_t size) {
-    if (!l || !obj || l->flag)
-      return NULL;
+    if (!l || !obj)
+      return NULL; 
     LL_ITER it = ll_iter_create((LLIST*) l);
     const void *data;
     while ((data=ll_iter_next(&it))) {
       if (!memcmp(data,obj,size))
         break;
     }
-    return data;
+    return data; 
 }
 
 int32_t ll_remove(LLIST *l, const void *obj)
 {
-    int32_t n = 0;
+	int32_t n = 0;
     LL_ITER it = ll_iter_create(l);
     void *data;
     while ((data=ll_iter_next(&it))) {
@@ -475,13 +462,13 @@ void ll_remove_data(LLIST *l, void *obj)
     }
 }
 
-// removes all elements from l where elements are in elements_to_remove
+// removes all elements from l where elements are in elements_to_remove 
 int32_t ll_remove_all(LLIST *l, const LLIST *elements_to_remove)
 {
 		int32_t count = 0;
 		LL_ITER it1 = ll_iter_create(l);
 		LL_ITER it2 = ll_iter_create((LLIST*) elements_to_remove);
-
+		
 		const void *data1, *data2;
 		while ((data1=ll_iter_next(&it1))) {
 				ll_iter_reset(&it2);
@@ -497,24 +484,20 @@ int32_t ll_remove_all(LLIST *l, const LLIST *elements_to_remove)
 		return count;
 }
 
-/* Returns an array with all elements sorted, the amount of elements is stored in size. We do not sort the original linked list
+/* Returns an array with all elements sorted, the amount of elements is stored in size. We do not sort the original linked list 
    as this might harm running iterations. Furthermore, we need the array anyway for qsort() to work. Remember to free() the result. */
 void **ll_sort(const LLIST *l, void *compare, int32_t *size)
 {
 	if (!l || !l->initial || !compare){
 		*size = 0;
-		return NULL;
+		return NULL;		
 	}
 	int32_t i=0;
 	LL_NODE *n;
-
+	
 	cs_readlock(&((LLIST*)l)->lock);
 	*size = l->count;
-	void **p;
-	if (!cs_malloc(&p, l->count * sizeof(p[0]))) {
-		cs_readunlock(&((LLIST*)l)->lock);
-		return NULL;
-	}
+	void **p = cs_malloc(&p, l->count*sizeof(p[0]), 0);	
 	for (n = l->initial; n; n = n->nxt) {
 		p[i++] = n->obj;
 	}
@@ -535,76 +518,4 @@ void ll_putall(LLIST *dest, LLIST *src)
 	while ((data=ll_iter_next(&it))) {
 		ll_append(dest, data);
 	}
-}
-
-//New Iterator:
-LL_LOCKITER *ll_li_create(LLIST *l, int32_t writelock)
-{
-        if (!l||l->flag) return NULL;
-        
-        LL_LOCKITER *li;
-        if (!cs_malloc(&li, sizeof(LL_LOCKITER)))
-                return NULL;
-
-        li->l = l;
-        li->writelock = writelock;
-        if (writelock)
-                cs_writelock(&l->lock);
-        else
-                cs_readlock(&l->lock);
-        li->it = ll_iter_create(l);
-        return li;
-}
-
-void ll_li_destroy(LL_LOCKITER *li)
-{
-        if (li && li->l) {
-                if (li->writelock)
-                        cs_writeunlock(&li->l->lock);
-                else
-                        cs_readunlock(&li->l->lock);
-                li->l = NULL;
-                add_garbage(li);
-        }
-}
-
-void *ll_li_next(LL_LOCKITER *li)
-{
-        if (li && li->l) {
-                return ll_iter_next_nolock(&li->it);
-        }
-        return NULL;
-}
-
-LLIST *ll_clone(LLIST *l, uint32_t copysize)
-{
-        if (!l||l->flag) return NULL;
-
-        LLIST *cloned = ll_create(l->lock.name);
-        LL_LOCKITER *li = ll_li_create(l, 0);
-        void *data;
-        while ((data=ll_li_next(li))) {
-                void *new_data;
-                if (!cs_malloc(&new_data, copysize))
-                        break;
-                memcpy(new_data, data, copysize);
-                ll_append_nolock(cloned, new_data);
-        }
-        ll_li_destroy(li);
-        return cloned;
-}
-
-void *ll_remove_first(LLIST *l) {
-        if (l && !l->flag) {
-                LL_ITER it = ll_iter_create(l);
-                void *data = ll_iter_next(&it);
-                if (data) ll_iter_remove(&it);
-                return data;
-        }
-        return NULL;
-}
-
-void ll_remove_first_data(LLIST *l) {
-        void *data = ll_remove_first(l);
-        if (data) free(data);
 }

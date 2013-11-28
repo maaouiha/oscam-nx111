@@ -3,44 +3,6 @@
 
 #define CMD_LEN 5
 
-static const char *cs_cert = "oscam.cert";
-
-static int search_boxkey(uint16_t caid, char *key)
-{
-	int i, rc = 0;
-	FILE *fp;
-	char c_caid[512];
-
-	snprintf(c_caid, sizeof(c_caid), "%s%s", cs_confdir, cs_cert);
-	fp = fopen(c_caid, "r");
-	if (fp) {
-		for (; (!rc) && fgets(c_caid, sizeof(c_caid), fp);) {
-			char *c_provid, *c_key;
-
-			c_provid = strchr(c_caid, '#');
-			if (c_provid)
-				*c_provid = '\0';
-			if (!(c_provid = strchr(c_caid, ':')))
-				continue;
-			*c_provid++ ='\0';
-			if (!(c_key = strchr(c_provid, ':')))
-				continue;
-			*c_key++ ='\0';
-			if (word_atob(trim(c_caid))!=caid)
-				continue;
-			if ((i=(strlen(trim(c_key))>>1)) > 256)
-				continue;
-			if (cs_atob((uchar *)key, c_key, i) < 0) {
-				cs_log("wrong key in \"%s\"", cs_cert);
-				continue;
-			}
-			rc = 1;
-		}
-		fclose(fp);
-	}
-	return rc;
-}
-
 static void RotateBytes1(unsigned char *out, unsigned char *in, int32_t n)
 {
   // loop is executed atleast once, so it's not a good idea to
@@ -429,7 +391,7 @@ static int32_t cryptoworks_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr)
 				memcpy(ep->hexserial, ep->emm + 5, 5);
 				cs_hexdump(1, rdr->hexserial, 5, dumprdrserial, sizeof(dumprdrserial));
 				cs_hexdump(1, ep->hexserial, 5, dumpemmserial, sizeof(dumpemmserial));
-				i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+12, ep->emmlen-12), ep->provid);
+				i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+12, ep->l-12), ep->provid);
 				rdr_debug_mask_sensitive(rdr, D_EMM, "UNIQUE, ep = {%s} rdr = {%s}", dumpemmserial, dumprdrserial);
 				return (!memcmp(ep->emm + 5, rdr->hexserial, 5)); // check for serial
 			}
@@ -441,7 +403,7 @@ static int32_t cryptoworks_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr)
 				memcpy(ep->hexserial, ep->emm + 5, 4);
 				cs_hexdump(1, rdr->hexserial, 4, dumprdrserial, sizeof(dumprdrserial));
 				cs_hexdump(1, ep->hexserial, 4, dumpemmserial, sizeof(dumpemmserial));
-				i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+12, ep->emmlen-12), ep->provid);
+				i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+12, ep->l-12), ep->provid);
 				rdr_debug_mask_sensitive(rdr, D_EMM, "SHARED, ep = {%s} rdr = {%s}", dumpemmserial, dumprdrserial);
 				return (!memcmp(ep->emm + 5, rdr->hexserial, 4)); // check for SA
 			}
@@ -451,8 +413,8 @@ static int32_t cryptoworks_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr)
 			   && ep->emm[6]==0x01 && ep->emm[8]==0x85) {
 				rdr_debug_mask(rdr, D_EMM, "SHARED (Header)");
 				ep->type = SHARED;
-				i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+8, ep->emmlen-8), ep->provid);
-				return 0;
+				i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+8, ep->l-8), ep->provid);
+				return FALSE;
 			}
 			break;
 		case 0x88:
@@ -460,8 +422,8 @@ static int32_t cryptoworks_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr)
   	 		if(ep->emm[3]==0xA9 && ep->emm[4]==0xFF && ep->emm[8]==0x83 && ep->emm[9]==0x01) {
 				rdr_debug_mask(rdr, D_EMM, "GLOBAL");
 				ep->type = GLOBAL;
-				i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+8, ep->emmlen-8), ep->provid);
-				return 1;
+				i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+8, ep->l-8), ep->provid);
+				return TRUE;
 			}
 			break;
 		case 0x8F:
@@ -470,26 +432,26 @@ static int32_t cryptoworks_get_emm_type(EMM_PACKET *ep, struct s_reader * rdr)
 
 			switch(ep->emm[4]) {
 				case 0x44:
-					i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+8, ep->emmlen-8), ep->provid);
+					i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+8, ep->l-8), ep->provid);
 					ep->type = GLOBAL; break;
 				case 0x48:
-					i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+12, ep->emmlen-12), ep->provid);
+					i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+12, ep->l-12), ep->provid);
 					ep->type = SHARED; break;
 				case 0x42:
-					i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+12, ep->emmlen-12), ep->provid);
+					i2b_buf(4, cryptoworks_get_emm_provid(ep->emm+12, ep->l-12), ep->provid);
 					ep->type = UNIQUE; break;
 			}
-			return 1;
+			return TRUE;
 
 		/* FIXME: Seems to be that all other EMM types are rejected by the card */
 		default:
 			ep->type = UNKNOWN;
 			rdr_debug_mask(rdr, D_EMM, "UNKNOWN");
-			return 0; // skip emm
+			return FALSE; // skip emm
 	}
 
 	rdr_debug_mask(rdr, D_EMM, "invaild");
-	return 0;
+	return FALSE;
 }
 
 static void cryptoworks_get_emm_filter(struct s_reader * rdr, uchar *filter)
@@ -545,6 +507,7 @@ static void cryptoworks_get_emm_filter(struct s_reader * rdr, uchar *filter)
 	memcpy(filter+idx+3, rdr->hexserial, 5);
 	memset(filter+idx+3+16, 0xFF, 5);
 	filter[1]++;
+	idx += 32;
 
 	return;
 }
@@ -745,15 +708,13 @@ int32_t cryptoworks_reassemble_emm(uchar *buffer, uint32_t *len) {
 
 			emm_len=*len-5 + emm_global_len-12;
 			unsigned char *tmp, *assembled;
-			if (!cs_malloc(&tmp, emm_len))
-				return 0;
-			if (!cs_malloc(&assembled, emm_len + 12)) {
+			if(!cs_malloc(&tmp,emm_len, -1)) return 0;
+			if(!cs_malloc(&assembled,emm_len+12, -1)){
 				free(tmp);
 				return 0;
 			}
 			unsigned char *assembled_EMM;
-			if (!cs_malloc(&assembled_EMM, emm_len + 12))
-				return 0;
+			if(!cs_malloc(&assembled_EMM,emm_len+12, -1)) return 0;
 			memcpy(tmp,&buffer[5], *len-5);
 			memcpy(tmp+*len-5,&emm_global[12],emm_global_len-12);
 			memcpy(assembled_EMM,emm_global,12);

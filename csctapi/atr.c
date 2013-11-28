@@ -22,8 +22,9 @@
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 #include "../globals.h"
+#include "defines.h"
 #include "atr.h"
-#define ERROR 1
+
 /* 
  * Not exported variables definition
  */
@@ -38,8 +39,7 @@ static const uint32_t atr_num_ib_table[16] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3
 
 const uint32_t atr_f_table[16] = {372, 372, 558, 744, 1116, 1488, 1860, 0, 0, 512, 768, 1024, 1536, 2048, 0, 0};
 
-const double atr_d_table[16] = {0, 1, 2, 4, 8, 16, 32, 64, 12, 20, 0, 0, 0, 0, 0, 0};
-//const double atr_d_table[16] = {0, 1, 2, 4, 8, 16, 32, 64, 12, 20, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625};
+const double atr_d_table[16] = {0, 1, 2, 4, 8, 16, 32, 64, 12, 20, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625};
 //old table has 0 for RFU:
 //double atr_d_table[16] = {0, 1, 2, 4, 8, 16, 0, 0, 0, 0, 0.5, 0.25, 125, 0.0625, 0.03125, 0.015625};
 
@@ -49,20 +49,18 @@ const uint32_t atr_i_table[4] = {25, 50, 100, 0};
  * Exported funcions definition
  */
 #ifdef WITH_CARDREADER
-int32_t ATR_InitFromArray (ATR * atr, const unsigned char atr_buffer[ATR_MAX_SIZE], uint32_t length)
+int32_t ATR_InitFromArray (ATR * atr, const BYTE atr_buffer[ATR_MAX_SIZE], uint32_t length)
 {
-	unsigned char TDi;
-	unsigned char buffer[ATR_MAX_SIZE];
+	BYTE TDi;
+	BYTE buffer[ATR_MAX_SIZE];
 	uint32_t pointer = 0, pn = 0;
 	
 	/* Check size of buffer */
-	if (length < 2){
-		cs_debug_mask(D_ATR,"ERROR: this ATR length is %d and minimum length is 2", length);
-		return (ERROR);
-	}
+	if (length < 2)
+		return (ATR_MALFORMED);
 	
 	/* Check if ATR is from a inverse convention card */
-	if (atr_buffer[0] == 0x03) // Readers of type R_MOUSE need this in case of inverse convention cards!
+	if (atr_buffer[0] == 0x03)
 	{
 		for (pointer = 0; pointer < length; pointer++)
 			buffer[pointer] = ~(INVERT_BYTE (atr_buffer[pointer]));
@@ -82,15 +80,15 @@ int32_t ATR_InitFromArray (ATR * atr, const unsigned char atr_buffer[ATR_MAX_SIZ
 	atr->hbn = TDi & 0x0F;
 	
 	/* TCK is not present by default */
-	(atr->TCK).present = 0;
+	(atr->TCK).present = FALSE;
 	
 	/* Extract interface bytes */
 	while (pointer < length)
 	{
 		/* Check buffer is long enought */
-		if (pointer + atr_num_ib_table[(0xF0 & TDi) >> 4] >= length){
-			cs_debug_mask(D_ATR,"ERROR: this ATR the %d interface bytes for protocol %d are missing", pointer + atr_num_ib_table[(0xF0 & TDi) >> 4], pn+1);
-			return (ERROR);
+		if (pointer + atr_num_ib_table[(0xF0 & TDi) >> 4] >= length)
+		{
+			return (ATR_MALFORMED);
 		}
 		
 		/* Check TAi is present */
@@ -98,11 +96,11 @@ int32_t ATR_InitFromArray (ATR * atr, const unsigned char atr_buffer[ATR_MAX_SIZ
 		{
 			pointer++;
 			atr->ib[pn][ATR_INTERFACE_BYTE_TA].value = buffer[pointer];
-			atr->ib[pn][ATR_INTERFACE_BYTE_TA].present = 1;
+			atr->ib[pn][ATR_INTERFACE_BYTE_TA].present = TRUE;
 		}
 		else
 		{
-			atr->ib[pn][ATR_INTERFACE_BYTE_TA].present = 0;
+			atr->ib[pn][ATR_INTERFACE_BYTE_TA].present = FALSE;
 		}
 		
 		/* Check TBi is present */
@@ -110,11 +108,11 @@ int32_t ATR_InitFromArray (ATR * atr, const unsigned char atr_buffer[ATR_MAX_SIZ
 		{
 			pointer++;
 			atr->ib[pn][ATR_INTERFACE_BYTE_TB].value = buffer[pointer];
-			atr->ib[pn][ATR_INTERFACE_BYTE_TB].present = 1;
+			atr->ib[pn][ATR_INTERFACE_BYTE_TB].present = TRUE;
 		}
 		else
 		{
-			atr->ib[pn][ATR_INTERFACE_BYTE_TB].present = 0;
+			atr->ib[pn][ATR_INTERFACE_BYTE_TB].present = FALSE;
 		}
 		
 		/* Check TCi is present */
@@ -122,11 +120,11 @@ int32_t ATR_InitFromArray (ATR * atr, const unsigned char atr_buffer[ATR_MAX_SIZ
 		{
 			pointer++;
 			atr->ib[pn][ATR_INTERFACE_BYTE_TC].value = buffer[pointer];
-			atr->ib[pn][ATR_INTERFACE_BYTE_TC].present = 1;
+			atr->ib[pn][ATR_INTERFACE_BYTE_TC].present = TRUE;
 		}
 		else
 		{
-			atr->ib[pn][ATR_INTERFACE_BYTE_TC].present = 0;
+			atr->ib[pn][ATR_INTERFACE_BYTE_TC].present = FALSE;
 		}
 		
 		/* Read TDi if present */
@@ -134,17 +132,15 @@ int32_t ATR_InitFromArray (ATR * atr, const unsigned char atr_buffer[ATR_MAX_SIZ
 		{
 			pointer++;
 			TDi = atr->ib[pn][ATR_INTERFACE_BYTE_TD].value = buffer[pointer];
-			atr->ib[pn][ATR_INTERFACE_BYTE_TD].present = 1;
+			atr->ib[pn][ATR_INTERFACE_BYTE_TD].present = TRUE;
 			(atr->TCK).present = ((TDi & 0x0F) != ATR_PROTOCOL_TYPE_T0);
-			if (pn >= ATR_MAX_PROTOCOLS){
-				cs_debug_mask(D_ATR,"ERROR: this ATR reports %d protocols but the maximum value is %d", pn+1, ATR_MAX_PROTOCOLS+1);
-				return (ERROR);
-			}
+			if (pn >= ATR_MAX_PROTOCOLS)
+				return (ATR_MALFORMED);
 			pn++;
 		}
 		else
 		{
-			atr->ib[pn][ATR_INTERFACE_BYTE_TD].present = 0;
+			atr->ib[pn][ATR_INTERFACE_BYTE_TD].present = FALSE;
 			break;
 		}
 	}
@@ -154,13 +150,13 @@ int32_t ATR_InitFromArray (ATR * atr, const unsigned char atr_buffer[ATR_MAX_SIZ
 	
 	/* Store historical bytes */
 	if (pointer + atr->hbn >= length) {
-		cs_debug_mask(D_ATR, "ERROR: this ATR reports %i historical bytes but there are only %i",atr->hbn, length-pointer-2);
+		cs_log("ATR is malformed, it reports %i historical bytes but there are only %i",atr->hbn, length-pointer-2);
 		if (length-pointer >= 2)
 			atr->hbn = length-pointer-2;
 		else {
 			atr->hbn = 0;
 			atr->length = pointer + 1;
-		  return (ERROR);
+		  return (ATR_MALFORMED);
 		}
 
 	}
@@ -171,10 +167,9 @@ int32_t ATR_InitFromArray (ATR * atr, const unsigned char atr_buffer[ATR_MAX_SIZ
 	/* Store TCK  */
 	if ((atr->TCK).present)
 	{	
-		if (pointer + 1 >= length){
-			cs_debug_mask(D_ATR,"ATR is malformed, this ATR should have a TCK byte but it was not received!");
+		if (pointer + 1 >= length)
 			return (ATR_MALFORMED);
-		}
+		
 		pointer++;
 		
 		(atr->TCK).value = buffer[pointer];
@@ -183,22 +178,22 @@ int32_t ATR_InitFromArray (ATR * atr, const unsigned char atr_buffer[ATR_MAX_SIZ
 	atr->length = pointer + 1;
 	
     // check that TA1, if pn==1 , has a valid value for FI
-    if ( atr->pn == 1 && atr->ib[pn][ATR_INTERFACE_BYTE_TA].present == 1 ) {
+    if ( (atr->pn==1) && (atr->ib[pn][ATR_INTERFACE_BYTE_TA].present == TRUE)) {
         uchar FI;
         cs_debug_mask(D_ATR, "TA1 = %02x",atr->ib[pn][ATR_INTERFACE_BYTE_TA].value);
         FI=(atr->ib[pn][ATR_INTERFACE_BYTE_TA].value & 0xF0)>>4;
         cs_debug_mask(D_ATR, "FI = %02x",FI);
         if(atr_fs_table[FI]==0) {
-            cs_debug_mask(D_ATR, "ERROR: this ATR FI for protocol #%d is not returning a valid cardfrequency value",pn+1);
-            return (ERROR);
+            cs_debug_mask(D_ATR, "Invalid ATR as FI is not returning a valid frequency value");
+            return (ATR_MALFORMED);
         }
     }
     
     // check that TB1 < 0x80
-    if ( atr->pn == 1 && atr->ib[pn][ATR_INTERFACE_BYTE_TB].present == 1 ) {
+    if ( (atr->pn==1) && (atr->ib[pn][ATR_INTERFACE_BYTE_TB].present == TRUE)) {
         if(atr->ib[pn][ATR_INTERFACE_BYTE_TB].value > 0x80) {
-            cs_debug_mask(D_ATR, "ERROR: this ATR TB1 for protocol #%d has an invalid value", pn+1);
-            return (ERROR);
+            cs_debug_mask(D_ATR, "Invalid ATR as TB1 has an invalid value");
+            return (ATR_MALFORMED);
         }
     }
 	return (ATR_OK);
@@ -210,10 +205,8 @@ int32_t ATR_GetConvention (ATR * atr, int32_t *convention)
 		(*convention) = ATR_CONVENTION_DIRECT;
 	else if (atr->TS == 0x3F)
 		(*convention) = ATR_CONVENTION_INVERSE;
-	else{
-		cs_debug_mask(D_ATR, "ERROR: this ATR TS byte is %02X and that should be 3B for direct or 3F for inverse convention!", atr->TS);
-		return (ERROR);
-	}
+	else
+		return (ATR_MALFORMED);
 		
 	return (ATR_OK);
 }
@@ -230,7 +223,7 @@ int32_t ATR_GetNumberOfProtocols (ATR * atr, uint32_t *number_protocols)
 	return (ATR_OK);
 }
 
-int32_t ATR_GetProtocolType (ATR * atr, uint32_t number_protocol, unsigned char *protocol_type)
+int32_t ATR_GetProtocolType (ATR * atr, uint32_t number_protocol, BYTE *protocol_type)
 {
 	if ((number_protocol > atr->pn) || number_protocol < 1)
 		return ATR_NOT_FOUND;
@@ -243,7 +236,7 @@ int32_t ATR_GetProtocolType (ATR * atr, uint32_t number_protocol, unsigned char 
 	return (ATR_OK);
 }
 
-int32_t ATR_GetInterfaceByte (ATR * atr, uint32_t number, int32_t character, unsigned char * value)
+int32_t ATR_GetInterfaceByte (ATR * atr, uint32_t number, int32_t character, BYTE * value)
 {
 	if (number > atr->pn || number < 1)
 		return (ATR_NOT_FOUND);
@@ -256,7 +249,7 @@ int32_t ATR_GetInterfaceByte (ATR * atr, uint32_t number, int32_t character, uns
 	return (ATR_OK);
 }
 
-int32_t ATR_GetIntegerValue (ATR * atr, int32_t name, unsigned char * value)
+int32_t ATR_GetIntegerValue (ATR * atr, int32_t name, BYTE * value)
 {
 	int32_t ret;
 	
@@ -340,9 +333,9 @@ int32_t ATR_GetIntegerValue (ATR * atr, int32_t name, unsigned char * value)
 	return ret;
 }
 
-int32_t ATR_GetParameter (ATR * atr, int32_t name, uint32_t *parameter)
+int32_t ATR_GetParameter (ATR * atr, int32_t name, double *parameter)
 {
-	unsigned char FI, DI, II, PI1, PI2, N;
+	BYTE FI, DI, II, PI1, PI2, N;
 	
 	if (name == ATR_PARAMETER_F)
 	{
@@ -389,7 +382,7 @@ int32_t ATR_GetParameter (ATR * atr, int32_t name, uint32_t *parameter)
 	return (ATR_NOT_FOUND);
 }
 
-int32_t ATR_GetHistoricalBytes (ATR * atr, unsigned char hist[ATR_MAX_HISTORICAL], uint32_t *length)
+int32_t ATR_GetHistoricalBytes (ATR * atr, BYTE hist[ATR_MAX_HISTORICAL], uint32_t *length)
 {
 	if (atr->hbn == 0)
 		return (ATR_NOT_FOUND);
@@ -399,7 +392,7 @@ int32_t ATR_GetHistoricalBytes (ATR * atr, unsigned char hist[ATR_MAX_HISTORICAL
 	return (ATR_OK);
 }
 
-int32_t ATR_GetRaw (ATR * atr, unsigned char buffer[ATR_MAX_SIZE], uint32_t *length)
+int32_t ATR_GetRaw (ATR * atr, BYTE buffer[ATR_MAX_SIZE], uint32_t *length)
 {
 	uint32_t i, j;
 	
@@ -437,7 +430,7 @@ int32_t ATR_GetRaw (ATR * atr, unsigned char buffer[ATR_MAX_SIZE], uint32_t *len
 	return ATR_OK;
 }
 
-int32_t ATR_GetCheckByte (ATR * atr, unsigned char * check_byte)
+int32_t ATR_GetCheckByte (ATR * atr, BYTE * check_byte)
 {
 	if (!((atr->TCK).present))
 		return (ATR_NOT_FOUND);
@@ -448,7 +441,7 @@ int32_t ATR_GetCheckByte (ATR * atr, unsigned char * check_byte)
 
 int32_t ATR_GetFsMax (ATR * atr, uint32_t *fsmax)
 {
-	unsigned char FI;
+	BYTE FI;
 	
 	if (ATR_GetIntegerValue (atr, ATR_INTEGER_VALUE_FI, &FI) == ATR_OK)
 		(*fsmax) = atr_fs_table[FI];

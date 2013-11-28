@@ -9,14 +9,26 @@
 
 #ifdef CS_CACHEEX
 
-#include "module-cacheex.h"
-#include "oscam-net.h"
-
 #define TYPE_REQUEST   1
 #define TYPE_REPLY     2
 #define TYPE_PINGREQ   3
 #define TYPE_PINGRPL   4
 #define TYPE_RESENDREQ 5
+
+int32_t csp_ecm_hash_calc(uchar *buf, int32_t n)
+{
+	int32_t i = 0;
+	int32_t h = 0;
+    for (i = 0; i < n; i++) {
+    	h = 31*h + buf[i];
+    }
+    return h;
+}
+
+int32_t csp_ecm_hash(ECM_REQUEST *er)
+{
+	return csp_ecm_hash_calc(er->ecm+3, er->l-3);
+}
 
 static void * csp_server(struct s_client *client __attribute__((unused)), uchar *mbuf __attribute__((unused)), int32_t n __attribute__((unused)))
 {
@@ -58,12 +70,10 @@ static int32_t csp_recv(struct s_client *client, uchar *buf, int32_t l)
 			er->srvid = srvid;
 			er->csp_hash = hash;
 			er->rc = E_FOUND;
-			if (chk_csp_ctab(er, &cfg.csp.filter_caidtab)) {
-				memcpy(er->cw, buf+13, sizeof(er->cw));
+			memcpy(er->cw, buf+13, sizeof(er->cw));
 
-				cs_ddump_mask(D_TRACE, er->cw, sizeof(er->cw), "received cw from csp caid=%04X srvid=%04X hash=%08X", caid, srvid, hash);
-				cacheex_add_to_cache_from_csp(client, er);
-			} else free(er);
+			cs_ddump_mask(D_TRACE, er->cw, sizeof(er->cw), "received cw from csp caid=%04X srvid=%04X hash=%08X", caid, srvid, hash);
+			cs_add_cache(client, er, 1);
     	  }
         break;
 
@@ -83,10 +93,9 @@ static int32_t csp_recv(struct s_client *client, uchar *buf, int32_t l)
 			er->srvid = srvid;
 			er->csp_hash = hash;
 			er->rc = E_UNHANDLED;
-			if (chk_csp_ctab(er, &cfg.csp.filter_caidtab) && cfg.csp.allow_request) {
-				cs_ddump_mask(D_TRACE, buf, l, "received ecm request from csp caid=%04X srvid=%04X hash=%08X", caid, srvid, hash);
-				cacheex_add_to_cache_from_csp(client, er);
-			} else free(er);
+
+			cs_ddump_mask(D_TRACE, buf, l, "received ecm request from csp caid=%04X srvid=%04X hash=%08X", caid, srvid, hash);
+			cs_add_cache(client, er, 1);
     	  }
         break;
 

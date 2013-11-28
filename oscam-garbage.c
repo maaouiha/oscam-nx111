@@ -1,9 +1,4 @@
 #include "globals.h"
-#include "oscam-garbage.h"
-#include "oscam-lock.h"
-#include "oscam-string.h"
-#include "oscam-time.h"
-
 #define HASH_BUCKETS 16
 
 struct cs_garbage {
@@ -17,7 +12,6 @@ struct cs_garbage {
 };
 
 struct cs_garbage *garbage_first[HASH_BUCKETS];
-struct cs_garbage *garbage_last[HASH_BUCKETS];
 CS_MUTEX_LOCK garbage_lock[HASH_BUCKETS];
 pthread_t garbage_thread;
 int32_t garbage_collector_active = 0;
@@ -32,24 +26,11 @@ void add_garbage(void *data) {
 		return;
 
 	if (!garbage_collector_active || garbage_debug == 1) {
-		cs_sleepms(1);
 		free(data);
 		return;
 	}
 
 	int32_t bucket = (uintptr_t)data/16 % HASH_BUCKETS;
-	struct cs_garbage *garbage;
-	if (!cs_malloc(&garbage, sizeof(struct cs_garbage))){
-     cs_sleepms(1);
-     free(data);
-     return;
-  }
-  garbage->time = time(NULL);
-	garbage->data = data;
-#ifdef WITH_DEBUG
-	garbage->file = file;
-	garbage->line = line;
-#endif
 	cs_writelock(&garbage_lock[bucket]);
 
 #ifdef WITH_DEBUG
@@ -61,7 +42,6 @@ void add_garbage(void *data) {
 				cs_log("Current garbage addition: %s, line %d.", file, line);
 				cs_log("Original garbage addition: %s, line %d.", garbagecheck->file, garbagecheck->line);
 				cs_writeunlock(&garbage_lock[bucket]);
-				free(garbage);
 				return;
 			}
 			garbagecheck = garbagecheck->next;
@@ -69,46 +49,54 @@ void add_garbage(void *data) {
 	}
 #endif
 
-	if(garbage_last[bucket]) garbage_last[bucket]->next = garbage;
-	else garbage_first[bucket] = garbage;
-	garbage_last[bucket] = garbage;
+	struct cs_garbage *garbage;
+	if (!cs_malloc(&garbage, sizeof(struct cs_garbage), -1))
+	{
+     free(data);
+     cs_writeunlock(&garbage_lock[bucket]);
+     return;
+    }
+	garbage->time = time(NULL);
+	garbage->data = data;
+	garbage->next = garbage_first[bucket];
+	#ifdef WITH_DEBUG
+	garbage->file = file;
+	garbage->line = line;
+	#endif
+	garbage_first[bucket] = garbage;
+
 	cs_writeunlock(&garbage_lock[bucket]);
 }
 
 void garbage_collector(void) {
+        time_t now;
         int8_t i;
-        struct cs_garbage *garbage, *next, *prev, *first;
+        struct cs_garbage *garbage, *next, *prev;
 
         while (garbage_collector_active) {
 
                 for(i = 0; i < HASH_BUCKETS; ++i){
 	                cs_writelock(&garbage_lock[i]);
-	                first = garbage_first[i];
-	                time_t deltime = time((time_t)0) - (2*cfg.ctimeout/1000 + 1); //clienttimeout +1 second
-	                for(garbage = first, prev = NULL; garbage; prev = garbage, garbage = garbage->next) {
-	                	if (deltime < garbage->time) {	// all following elements are too new
-	                		if(prev){
-		                		garbage_first[i] = garbage;
-		            				prev->next = NULL;
-	                		}
-	                		break;
-	                	}
-	                }
-	                if(!garbage && garbage_first[i]){		// end of list reached and everything is to be cleaned
-	                	garbage = first;
-	                	garbage_first[i] = NULL;
-	                	garbage_last[i] = NULL;
-	                } else if(prev) garbage = first;		// set back to beginning to cleanup all
-	                else garbage = NULL;		// garbage not old enough yet => nothing to clean
-	                cs_writeunlock(&garbage_lock[i]);
+	                now = time(NULL);
 
-									// list has been taken out before so we don't need a lock here anymore! 
-	                while(garbage){
-	                	next = garbage->next;
-	                	free(garbage->data);
-	                	free(garbage);
-	                	garbage = next;
+	                prev = NULL;
+	                garbage = garbage_first[i];
+	                while (garbage) {
+	                        next = garbage->next;
+	                        if (now > (time_t)(garbage->time+cfg.ctimeout/1000+1)) { //clienttimeout +1 second
+	                                free(garbage->data);
+
+	                                if (prev)
+	                                        prev->next = next;
+	                                else
+	                                        garbage_first[i] = next;
+	                                free(garbage);
+	                        }
+	                        else
+	                                prev = garbage;
+	                        garbage = next;
 	                }
+	                cs_writeunlock(&garbage_lock[i]);
 	              }
                 cs_sleepms(1000);
         }

@@ -941,10 +941,8 @@ static lzo_bool ptr_check(void)
 
 	if (r == 1)
 	{
-	    lzo_uint32 *a0 = (lzo_uint32 *)&x[k];
-	    lzo_uint32 *a1 = (lzo_uint32 *)&x[k+n];
-	    lzo_uint32 v0 = *a0;
-	    lzo_uint32 v1 = *a1;
+	    lzo_uint32 v0 = * (lzo_uint32 *) &x[k];
+	    lzo_uint32 v1 = * (lzo_uint32 *) &x[k+n];
 
 	    r &= __lzo_assert(v0 > 0);
 	    r &= __lzo_assert(v1 > 0);
@@ -1013,10 +1011,8 @@ _lzo_config_check(void)
     {
 	unsigned short b[4];
 
-	for (i = 0; i < 4; i++) {
-	    const unsigned short *c = (const unsigned short *)&u.x[i];
-	    b[i] = *c;
-	}
+	for (i = 0; i < 4; i++)
+	    b[i] = * (const unsigned short *) &u.x[i];
 
 #  if (LZO_BYTE_ORDER == LZO_LITTLE_ENDIAN)
 	r &= __lzo_assert(b[0] == 0x0100);
@@ -1038,10 +1034,8 @@ _lzo_config_check(void)
     {
 	lzo_uint32 a[4];
 
-	for (i = 0; i < 4; i++) {
-	    const lzo_uint32 *b = (const lzo_uint32 *)&u.x[i];
-	    a[i] = *b;
-	}
+	for (i = 0; i < 4; i++)
+	    a[i] = * (const lzo_uint32 *) &u.x[i];
 
 #  if (LZO_BYTE_ORDER == LZO_LITTLE_ENDIAN)
 	r &= __lzo_assert(a[0] == 0x03020100L);
@@ -1100,9 +1094,9 @@ _lzo_config_check(void)
 static lzo_bool schedule_insns_bug(void)
 {
 #if 1
-    const int c[] = {1, 2, 0};
+    const int clone[] = {1, 2, 0};
     const int *q;
-    q = c;
+    q = clone;
     if (*q)
 	return 0;
     return 1;

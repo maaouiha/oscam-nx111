@@ -41,9 +41,6 @@ void set_known_card_info(struct s_reader * reader, const unsigned char * atr, co
        13, 1992, 0, NDS1, "VideoGuard Sky New Zealand (0969)"}, //160E
     {{ 0x3F, 0x78, 0x12, 0x25, 0x01, 0x40, 0xB0, 0x14, 0x4A, 0x50, 0x01, 0x53, 0x44 },
        13, 1997, 0, NDS1, "VideoGuard StarTV India (caid unknown)"}, //105.5E
-    {{ 0x3F, 0x7F, 0x13, 0x25, 0x02, 0x40, 0xB0, 0x12, 0x69, 0xFF, 0x4A, 0x50, 0x81, 0x43, 0x48, 0x00,
-       0x00, 0x00, 0x00, 0x00 },
-       20, 1997, 0, NDS11, "VideoGuard China (099C)"}, //115.5E
     /* known NDS1+ atrs */
     {{ 0x3F, 0x7F, 0x13, 0x25, 0x04, 0x33, 0xB0, 0x02, 0x69, 0xFF, 0x4A, 0x50, 0xE0, 0x00, 0x00, 0x54,
        0x42, 0x00, 0x00, 0x00 },
@@ -219,7 +216,7 @@ static void cCamCryptVG_Process_D0(struct s_reader * reader, const unsigned char
 static void cCamCryptVG_Process_D1(struct s_reader * reader, const unsigned char *ins, unsigned char *data, const unsigned char *status);
 static void cCamCryptVG_Decrypt_D3(struct s_reader * reader, unsigned char *ins, unsigned char *data, const unsigned char *status);
 static void cCamCryptVG_PostProcess_Decrypt(struct s_reader * reader, unsigned char *rxbuff);
-static int32_t cAES_Encrypt(struct s_reader * reader, const unsigned char *data, int32_t len, unsigned char *crypted);
+static int32_t cAES_Encrypt(struct s_reader * reader, const unsigned char *data, int32_t len, unsigned char *crypt);
 static void swap_lb (const unsigned char *buff, int32_t len);
 
 int32_t cw_is_valid(unsigned char *cw) // returns 1 if cw_is_valid, returns 0 if cw is all zeros
@@ -237,11 +234,11 @@ void cAES_SetKey(struct s_reader * reader, const unsigned char *key)
   AES_set_encrypt_key(key,128,&(reader->ekey));
 }
 
-int32_t cAES_Encrypt(struct s_reader * reader, const unsigned char *data, int32_t len, unsigned char *crypted)
+int32_t cAES_Encrypt(struct s_reader * reader, const unsigned char *data, int32_t len, unsigned char *crypt)
 {
     len=(len+15)&(~15); // pad up to a multiple of 16
     int32_t i;
-    for(i=0; i<len; i+=16) AES_encrypt(data+i,crypted+i,&(reader->ekey));
+    for(i=0; i<len; i+=16) AES_encrypt(data+i,crypt+i,&(reader->ekey));
     return len;
 }
 
@@ -359,16 +356,16 @@ static void cCamCryptVG_Process_D0(struct s_reader * reader, const unsigned char
       uint16_t iidata[32];
       memcpy( (unsigned char*)&iidata, data, 64 );
       for(count2=0; count2<32; count2++) {
-        uint32_t rem=0, divisor=key1[count2];
+        uint32_t rem=0, div=key1[count2];
         int8_t i;
         for(i=31; i>=0; i--) {
           uint32_t x=iidata[i] | (rem<<16);
-          rem=(x%divisor)&0xffff;
+          rem=(x%div)&0xffff;
           }
-        uint32_t carry=1, t=val_by2on3(divisor) | 1;
+        uint32_t carry=1, t=val_by2on3(div) | 1;
         while(t) {
-          if(t&1) carry=((carry*rem)%divisor)&0xffff;
-          rem=((rem*rem)%divisor)&0xffff;
+          if(t&1) carry=((carry*rem)%div)&0xffff;
+          rem=((rem*rem)%div)&0xffff;
           t>>=1;
           }
         cCamCryptVG_PartialMod(carry,count2,key2,key1);
@@ -556,8 +553,8 @@ int32_t status_ok(const unsigned char *status)
 }
 
 void memorize_cmd_table (struct s_reader * reader, const unsigned char *mem, int32_t size){
-  if (cs_malloc(&reader->cmd_table, size))
-    memcpy(reader->cmd_table,mem,size);
+  if(cs_malloc(&reader->cmd_table,sizeof(unsigned char) * size, -1))
+  	memcpy(reader->cmd_table,mem,size);
 }
 
 int32_t cmd_table_get_info(struct s_reader * reader, const unsigned char *cmd, unsigned char *rlen, unsigned char *rmode)
@@ -643,10 +640,21 @@ int32_t do_cmd(struct s_reader * reader, const unsigned char *ins, const unsigne
   return len;
 }
 
+void rev_date_calc(const unsigned char *Date, int32_t *year, int32_t *mon, int32_t *day, int32_t *hh, int32_t *mm, int32_t *ss, int32_t base_year)
+{
+  *year=(Date[0]/12)+base_year;
+  *mon=(Date[0]%12)+1;
+  *day=Date[1] & 0x1f;
+  *hh=Date[2]/8;
+  *mm=(0x100*(Date[2]-*hh*8)+Date[3])/32;
+  *ss=(Date[3]-*mm*32)*2;
+}
+
 void rev_date_calc_tm(const unsigned char *Date, struct tm *timeinfo , int32_t base_year)
 {
-	timeinfo->tm_year = Date[0] / 12 + base_year - 1900; //tm year starts at 1900
-	timeinfo->tm_mon  = Date[0] % 12; //tm month starts with 0
+	memset(&timeinfo, 0, sizeof(timeinfo));
+	timeinfo->tm_year = (Date[0]/12) + base_year;
+	timeinfo->tm_mon = (Date[0]%12) + 1;
 	timeinfo->tm_mday = Date[1] & 0x1f;
 	timeinfo->tm_hour = Date[2] / 8;
 	timeinfo->tm_min = (0x100 * (Date[2] - timeinfo->tm_hour * 8) + Date[3]) / 32;
@@ -678,28 +686,28 @@ xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx
 		case VG_EMMTYPE_G:
 			rdr_debug_mask(rdr, D_EMM, "GLOBAL");
 			ep->type=GLOBAL;
-			return 1;
+			return TRUE;
 
 		case VG_EMMTYPE_U:
 		case VG_EMMTYPE_S:
 			rdr_debug_mask(rdr, D_EMM, "%s", (emmtype == VG_EMMTYPE_U) ? "UNIQUE" : "SHARED");
 			ep->type=emmtype;
 			if (ep->emm[1] == 0) // detected UNIQUE EMM from cccam (there is no serial)
-				return 1;
+				return TRUE;
 
 			for (i = 0; i < serial_count; i++) {
 				if (!memcmp(&ep->emm[i * 4 + 4], rdr->hexserial + 2, serial_len)) {
 					memcpy(ep->hexserial, &ep->emm[i * 4 + 4], serial_len);
-					return 1;
+					return TRUE;
 				}
 			}
-			return 0; // if UNIQUE or SHARED but no serial match return FALSE
+			return FALSE; // if UNIQUE or SHARED but no serial match return FALSE
 
 		default:
 			//remote emm without serial
 			rdr_debug_mask(rdr, D_EMM, "UNKNOWN");
 			ep->type=UNKNOWN;
-			return 1;
+			return TRUE;
 	}
 }
 
@@ -751,7 +759,7 @@ int32_t videoguard_do_emm(struct s_reader * reader, EMM_PACKET *ep, unsigned cha
       emmv2 = ep->emm[offs+1];
       offs += 2 + 1 + emmv2;  // skip sub-emm len (2 bytes sub-emm len if 0x01);
    }
-   for (position = 0; position < nsubs && offs+2 < ep->emmlen; ++position)
+   for (position = 0; position < nsubs && offs+2 < ep->l; ++position)
    {
       if (ep->emm[offs] > 0x07)  // workaround for mgcamd and emmv2
          ++offs;
@@ -767,14 +775,14 @@ int32_t videoguard_do_emm(struct s_reader * reader, EMM_PACKET *ep, unsigned cha
             else
             {
                offs += ep->emm[offs+1] + 2;
-               if (!(offs+1 < ep->emmlen)) return rc;
+               if (!(offs+1 < ep->l)) return rc;
                if (ep->emm[offs] == 0x00 && (ep->emm[offs+1] == 0x00 || ep->emm[offs+1] == 0x01))
                   offs += 2 + 1 + emmv2;
                continue;
             }
          }
          offs += ep->emm[offs+1] + 2;
-         if (!(offs+1 < ep->emmlen)) return rc;
+         if (!(offs+1 < ep->l)) return rc;
          if (ep->emm[offs] != 0)
          {
             if (ep->type == GLOBAL || vdrsc_fix || position == ua_position)
@@ -787,7 +795,7 @@ int32_t videoguard_do_emm(struct s_reader * reader, EMM_PACKET *ep, unsigned cha
                   (*read_tiers)(reader);
             }
             offs += ep->emm[offs] + 1;
-            if (offs < ep->emmlen && ep->emm[offs] == 0x00) ++offs;
+            if (offs < ep->l && ep->emm[offs] == 0x00) ++offs;
          }
          offs += 1 + emmv2;
          if (vdrsc_fix) --position;
@@ -843,6 +851,7 @@ void videoguard_get_emm_filter(struct s_reader * rdr, uchar *filter)
 	filter[idx+1]    = 0x00;
 	filter[idx+1+16] = 0xC0;
 	filter[1]++;
+	idx += 32;
 
 	return;
 }
@@ -900,7 +909,7 @@ static void msgs_init(uint32_t baseyear)
    while (fgets(buffer, sizeof(buffer), fp))
    {
       MAILMSG *msg;
-      if (!cs_malloc(&msg, sizeof(MAILMSG)))
+      if (cs_malloc(&msg, sizeof(MAILMSG), -1) == 0)
       {
          fclose(fp);
          return;
@@ -927,7 +936,7 @@ void videoguard_mail_msg(struct s_reader *rdr, uint8_t *data)
       return;
 
    uint16_t msg_id = (data[2] << 8) | data[3];
-   uint8_t idx = data[4] & 0x0F;
+   uint8_t index = data[4] & 0x0F;
    int32_t msg_size = data[5] * 10 + 2;
    uint16_t date = (data[9] << 8) | data[10];
    int32_t submsg_len = data[12] - 2;
@@ -938,17 +947,17 @@ void videoguard_mail_msg(struct s_reader *rdr, uint8_t *data)
 
    if (msg == 0)
    {
-      if (!cs_malloc(&msg, sizeof(MAILMSG)))
+      if (cs_malloc(&msg, sizeof(MAILMSG), -1) == 0)
          return;
       msg->caid = rdr->caid;
       msg->serial = serial;
       msg->date = date;
       msg->id = msg_id;
       msg->nsubs = (data[4] & 0xF0) >> 4;
-      msg->mask = 1 << idx;
+      msg->mask = 1 << index;
       msg->written = 0;
       msg->len = submsg_len;
-      if (!cs_malloc(&msg->message, msg_size))
+      if (cs_malloc(&msg->message, msg_size, -1) == 0)
       {
          free(msg);
          return;
@@ -960,9 +969,9 @@ void videoguard_mail_msg(struct s_reader *rdr, uint8_t *data)
    }
    else
    {
-      if (msg->written == 1 || msg->mask & (1 << idx))
+      if (msg->written == 1 || msg->mask & (1 << index))
          return;
-      msg->mask |= 1 << idx;
+      msg->mask |= 1 << index;
       msg->len += submsg_len;
       memcpy(&msg->message[submsg_idx], &data[15], submsg_len);
    }

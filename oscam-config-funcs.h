@@ -29,10 +29,6 @@
 #  define _XOPEN_SOURCE_EXTENDED
 #endif
 
-#if defined(__APPLE__) && !defined(s6_addr32)
-#define s6_addr32 __u6_addr.__u6_addr32
-#endif
-
 /*
  * These functions allow checking of configuration variables in
  * the C code without using #ifdefs's. The dead code elimination
@@ -43,14 +39,6 @@
 
 static inline int config_WEBIF(void) {
 	#ifdef WEBIF
-	return 1;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_TOUCH(void) {
-	#if defined(WEBIF) && defined(TOUCH)
 	return 1;
 	#else
 	return 0;
@@ -129,22 +117,6 @@ static inline int config_WITH_COOLAPI(void) {
 	#endif
 }
 
-static inline int config_WITH_AZBOX(void) {
-	#ifdef WITH_AZBOX
-	return 1;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_WITH_MCA(void) {
-	#ifdef WITH_MCA
-	return 1;
-	#else
-	return 0;
-	#endif
-}
-
 static inline int config_WITH_DEBUG(void) {
 	#ifdef WITH_DEBUG
 	return 1;
@@ -163,14 +135,6 @@ static inline int config_WITH_LB(void) {
 
 static inline int config_LCDSUPPORT(void) {
 	#ifdef LCDSUPPORT
-	return 1;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_LEDSUPPORT(void) {
-	#ifdef LEDSUPPORT
 	return 1;
 	#else
 	return 0;
@@ -281,14 +245,6 @@ static inline int config_MODULE_PANDORA(void) {
 	#endif
 }
 
-static inline int config_MODULE_GHTTP(void) {
-	#ifdef MODULE_GHTTP
-	return 1;
-	#else
-	return 0;
-	#endif
-}
-
 static inline int config_WITH_CARDREADER(void) {
 	#ifdef WITH_CARDREADER
 	return 1;
@@ -393,89 +349,17 @@ static inline int config_CS_CACHEEX(void) {
 	#endif
 }
 
-static inline int config_CARDREADER_PHOENIX(void) {
-	#ifdef CARDREADER_PHOENIX
-	return config_WITH_CARDREADER() ? 1 : 0;
+static inline int config_QBOXHD(void) {
+	#ifdef QBOXHD
+	return 1;
 	#else
 	return 0;
 	#endif
 }
 
-static inline int config_CARDREADER_INTERNAL_AZBOX(void) {
-	#ifdef CARDREADER_INTERNAL_AZBOX
-	return config_WITH_CARDREADER() ? 1 : 0;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_CARDREADER_INTERNAL_COOLAPI(void) {
-	#ifdef CARDREADER_INTERNAL_COOLAPI
-	return config_WITH_CARDREADER() ? 1 : 0;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_CARDREADER_INTERNAL_SCI(void) {
-	#ifdef CARDREADER_INTERNAL_SCI
-	return config_WITH_CARDREADER() ? 1 : 0;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_CARDREADER_SC8IN1(void) {
-	#ifdef CARDREADER_SC8IN1
-	return config_WITH_CARDREADER() ? 1 : 0;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_CARDREADER_MP35(void) {
-	#ifdef CARDREADER_MP35
-	return config_WITH_CARDREADER() ? 1 : 0;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_CARDREADER_SMARGO(void) {
-	#ifdef CARDREADER_SMARGO
-	return config_WITH_CARDREADER() ? 1 : 0;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_CARDREADER_PCSC(void) {
-	#ifdef CARDREADER_PCSC
-	return config_WITH_CARDREADER() ? 1 : 0;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_CARDREADER_SMART(void) {
-	#ifdef CARDREADER_SMART
-	return config_WITH_CARDREADER() ? 1 : 0;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_CARDREADER_DB2COM(void) {
-	#ifdef CARDREADER_DB2COM
-	return config_WITH_CARDREADER() ? 1 : 0;
-	#else
-	return 0;
-	#endif
-}
-
-static inline int config_CARDREADER_STAPI(void) {
-	#ifdef CARDREADER_STAPI
-	return config_WITH_CARDREADER() ? 1 : 0;
+static inline int config_ARM(void) {
+	#ifdef __arm__
+	return 1;
 	#else
 	return 0;
 	#endif

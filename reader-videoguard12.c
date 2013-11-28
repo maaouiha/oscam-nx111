@@ -71,13 +71,20 @@ static void read_tiers(struct s_reader *reader)
     if (cta_res[2] == 0 && cta_res[3] == 0) {
       break;
     }
+    int32_t y, m, d, H, M, S;
+    rev_date_calc(&cta_res[4], &y, &m, &d, &H, &M, &S, reader->card_baseyear);
     uint16_t tier_id = (cta_res[2] << 8) | cta_res[3];
+
+    // add entitlements to list
     struct tm timeinfo;
     memset(&timeinfo, 0, sizeof(struct tm));
-    rev_date_calc_tm(&cta_res[4],&timeinfo,reader->card_baseyear);
+    timeinfo.tm_year = y - 1900; //tm year starts with 1900
+    timeinfo.tm_mon = m - 1; //tm month starts with 0
+    timeinfo.tm_mday = d;
     cs_add_entitlement(reader, reader->caid, b2ll(4, reader->prid[0]), tier_id, 0, 0, mktime(&timeinfo), 4);
+
     char tiername[83];
-    rdr_log(reader, "tier: %04x, expiry date: %04d/%02d/%02d-%02d:%02d:%02d %s",tier_id,timeinfo.tm_year+1900,timeinfo.tm_mon+1,timeinfo.tm_mday,timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec,get_tiername(tier_id, reader->caid, tiername));
+    rdr_log(reader, "tier: %04x, expiry date: %04d/%02d/%02d-%02d:%02d:%02d %s", tier_id, y, m, d, H, M, S, get_tiername(tier_id, reader->caid, tiername));
   }
 }
 
@@ -87,10 +94,10 @@ static int32_t videoguard12_card_init(struct s_reader *reader, ATR *newatr)
   get_hist;
 
   if ((hist_size < 7) || (hist[1] != 0xB0) || (hist[4] != 0xFF) || (hist[5] != 0x4A) || (hist[6] != 0x50)){
-  //  rdr_debug_mask(reader, D_READER, "failed history check");
+    rdr_debug_mask(reader, D_READER, "failed history check");
     return ERROR;
   }
-  //rdr_debug_mask(reader, D_READER, "passed history check");
+  rdr_debug_mask(reader, D_READER, "passed history check");
 
   get_atr;
   def_resp;
@@ -241,7 +248,6 @@ static int32_t videoguard12_card_init(struct s_reader *reader, ATR *newatr)
       boxID[i] = (reader->boxid >> (8 * (3 - i))) % 0x100;
     }
     rdr_debug_mask(reader, D_READER, "oscam.server BoxID: %02X%02X%02X%02X", boxID[0], boxID[1], boxID[2], boxID[3]);
-    boxidOK = 1;
   }
 
   if (!boxidOK) {
