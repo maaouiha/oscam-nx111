@@ -31,6 +31,7 @@ static int32_t camd33_recv(struct s_client * client, uchar *buf, int32_t l)
     if (client->crypted)
       aes_encrypt_idx(&cur_client()->aes_keys, buf, n);
   }
+  if (n<=0) cs_disconnect_client(client);
   cs_ddump_mask(D_CLIENT, buf, n, "received %d bytes from client", n);
   return(n);
 }
